@@ -7,7 +7,7 @@ tools and path branching:
 - every specialist agent calls the same frozen base LLM by default;
 - the active dataset decides a fixed agent pool and fixed step budget;
 - the orchestrator selects exactly one agent per step with `argmax`;
-- each dataset owns an independent frozen encoder plus trainable MLP router;
+- each dataset owns a Puppeteer-compatible frozen Qwen state encoder plus trainable MLP router;
 - runs can be executed in train or inference mode.
 
 ## Default Model
@@ -18,8 +18,11 @@ The default LLM is local Qwen2.5-7B-Instruct:
 /data2/guoyuhan/qwen_semantic_clustering_feasibility/.hf_cache/models--Qwen--Qwen2.5-7B-Instruct/snapshots/a09a35458c702b33eeacc393d103063234e8bc28
 ```
 
-You can replace it with `--llm-model-path` or use `--llm-backend mock` for fast
-pipeline tests that do not load a model.
+The router state encoder always uses the Puppeteer-compatible Qwen path:
+`apply_chat_template(..., add_generation_prompt=False)` followed by the last
+valid token hidden state. There is no hash or mean-pooling fallback.
+Specialist generation also follows Puppeteer's 1024-token context and 96-token
+generation limit.
 
 ## Quick Checks
 
@@ -38,4 +41,6 @@ CUDA_VISIBLE_DEVICES=0 TOKENIZERS_PARALLELISM=false \
 ```
 
 Results are written to `runs/<task>/<mode>/<timestamp>/results.jsonl`.
-Router checkpoints are written to `checkpoints/<task>/router.pt`.
+Puppeteer policy checkpoints can be loaded directly with `--checkpoint`.
+New EcoMAS checkpoints use the same `model_state_dict`, `input_dim`, and
+`output_dim` format.

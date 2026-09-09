@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import hashlib
+from copy import deepcopy
 from pathlib import Path
+from typing import Any
 
 import torch
 from torch import nn
@@ -13,32 +14,9 @@ class FrozenTextEncoder(nn.Module):
         raise NotImplementedError
 
 
-class HashingTextEncoder(FrozenTextEncoder):
-    def __init__(self, dim: int = 768) -> None:
-        super().__init__()
-        self.dim = dim
-        for param in self.parameters():
-            param.requires_grad_(False)
+class PuppeteerStateEncoder(FrozenTextEncoder):
+    """Qwen state encoder compatible with Puppeteer's policy checkpoints."""
 
-    @property
-    def output_dim(self) -> int:
-        return self.dim
-
-    def forward(self, texts: list[str]) -> torch.Tensor:
-        vectors = []
-        for text in texts:
-            vec = torch.zeros(self.dim, dtype=torch.float32)
-            for token in text.split():
-                digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
-                idx = int.from_bytes(digest[:4], "little") % self.dim
-                sign = 1.0 if digest[4] % 2 == 0 else -1.0
-                vec[idx] += sign
-            norm = vec.norm(p=2)
-            vectors.append(vec / norm if norm > 0 else vec)
-        return torch.stack(vectors, dim=0)
-
-
-class HFMeanPoolingEncoder(FrozenTextEncoder):
     def __init__(self, model_path: Path, device: str = "auto") -> None:
         super().__init__()
         from transformers import AutoModel, AutoTokenizer
@@ -60,21 +38,60 @@ class HFMeanPoolingEncoder(FrozenTextEncoder):
     def output_dim(self) -> int:
         return self._output_dim
 
-    def forward(self, texts: list[str]) -> torch.Tensor:
+    @staticmethod
+    def truncate(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        messages = deepcopy(messages)
+        length = sum(len(str(message.get("content", ""))) for message in messages)
+        while length > 12000:
+            for message in messages:
+                content = str(message.get("content", ""))
+                message["content"] = content[-int(len(content) * 0.75):]
+            length = sum(len(str(message.get("content", ""))) for message in messages)
+        return messages
+
+    def _encode_messages(self, messages: list[dict[str, Any]]):
+        messages = self.truncate(messages)
+        return self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=False,
+            return_tensors="pt",
+            return_dict=True,
+            truncation=True,
+            max_length=1024,
+        )
+
+    def forward(self, message_batches: list[list[dict[str, Any]]]) -> torch.Tensor:
         device = next(self.model.parameters()).device
-        encoded = self.tokenizer(
-            texts, return_tensors="pt", padding=True, truncation=True, max_length=1024
+        tokenized = [self._encode_messages(messages) for messages in message_batches]
+        input_ids = torch.nn.utils.rnn.pad_sequence(
+            [item["input_ids"][0] for item in tokenized],
+            batch_first=True,
+            padding_value=self.tokenizer.pad_token_id,
         ).to(device)
+        attention_mask = torch.nn.utils.rnn.pad_sequence(
+            [item["attention_mask"][0] for item in tokenized],
+            batch_first=True,
+            padding_value=0,
+        ).to(device)
+        base_model = getattr(self.model, "model", self.model)
         with torch.inference_mode():
-            output = self.model(**encoded)
-        mask = encoded["attention_mask"].unsqueeze(-1).to(output.last_hidden_state.dtype)
-        pooled = (output.last_hidden_state * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(1)
-        return pooled.float().cpu()
+            output = base_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                use_cache=False,
+                return_dict=True,
+            )
+        last_index = attention_mask.sum(dim=1).clamp(min=1) - 1
+        batch_indices = torch.arange(output.last_hidden_state.size(0), device=device)
+        states = output.last_hidden_state[batch_indices, last_index, :].detach()
+        return states.float().cpu()
 
 
-def build_encoder(backend: str, dim: int, model_path: Path, device: str) -> FrozenTextEncoder:
-    if backend == "hash":
-        return HashingTextEncoder(dim)
-    if backend == "hf":
-        return HFMeanPoolingEncoder(model_path, device)
-    raise ValueError(f"Unknown encoder backend: {backend}")
+def build_encoder(backend: str, model_path: Path, device: str) -> FrozenTextEncoder:
+    if backend != "hf":
+        raise ValueError(
+            "EcoMAS now requires the Puppeteer-compatible Hugging Face state encoder; "
+            f"unsupported backend: {backend}"
+        )
+    return PuppeteerStateEncoder(model_path, device)

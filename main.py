@@ -25,7 +25,6 @@ def build_runtime(args: argparse.Namespace) -> RuntimeConfig:
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
         encoder_backend=args.encoder_backend,
-        encoder_dim=args.encoder_dim,
         device=args.device,
     )
 
@@ -42,7 +41,6 @@ def build_runner(task_name: str, runtime: RuntimeConfig, checkpoint: Path | None
     agents = [SpecialistAgent(spec, llm) for spec in task_cfg["agents"]]
     encoder = build_encoder(
         runtime.encoder_backend,
-        runtime.encoder_dim,
         runtime.llm_model_path,
         runtime.device,
     )
@@ -79,10 +77,9 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
             "a09a35458c702b33eeacc393d103063234e8bc28"
         ),
     )
-    parser.add_argument("--max-new-tokens", type=int, default=384)
+    parser.add_argument("--max-new-tokens", type=int, default=96)
     parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--encoder-backend", choices=["hash", "hf"], default="hash")
-    parser.add_argument("--encoder-dim", type=int, default=768)
+    parser.add_argument("--encoder-backend", choices=["hf"], default="hf")
     parser.add_argument("--device", default="auto")
 
 

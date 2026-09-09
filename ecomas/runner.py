@@ -58,18 +58,28 @@ class MASRunner:
         training: bool = False,
         loss_fn: Callable[[str, str, str], float] | None = None,
     ) -> tuple[RunRecord, torch.Tensor | None]:
-        history = ""
+        for agent in self.agents.values():
+            agent.reset()
+
+        previous_results: list[str] = []
+        state_messages = [
+            {
+                "role": "system",
+                "content": f"You are an assistant. Your task is to {sample.input_text}",
+            }
+        ]
         step_records: list[StepRecord] = []
         log_probs: list[torch.Tensor] = []
         final_candidate = ""
 
         for step in range(1, int(self.task_config["steps"]) + 1):
-            state_text = self._state_text(sample.input_text, history, step)
-            encoded = self.encoder([state_text])
+            encoded = self.encoder([state_messages])
             decision = self.router.decide(encoded)
             agent = self.agents[decision.agent_name]
             output: AgentOutput = agent.run(
-                sample.input_text, history, str(self.task_config["answer_format"])
+                sample.input_text,
+                previous_results,
+                str(self.task_config["display_name"]),
             )
             final_candidate = output.candidate_answer
             log_probs.append(decision.log_prob)
@@ -83,7 +93,10 @@ class MASRunner:
                     raw_text=output.raw_text,
                 )
             )
-            history = self._append_history(history, output)
+            previous_results.append(
+                f"Successful Action: reasoning\nResult: {output.raw_text}"
+            )
+            state_messages = agent.state_messages()
 
         correct = is_correct(self.task_name, final_candidate, sample.gold_answer)
         record = RunRecord(
@@ -103,18 +116,6 @@ class MASRunner:
             reward = torch.tensor(float(score), device=self.router.device)
             loss = -reward * torch.stack(log_probs).sum()
         return record, loss
-
-    def _state_text(self, input_text: str, history: str, step: int) -> str:
-        return f"task={self.task_name}\nstep={step}\n{input_text}\nhistory:\n{history}"
-
-    def _append_history(self, history: str, output: AgentOutput) -> str:
-        new_item = (
-            f"[{output.agent_name}]\n"
-            f"Analysis: {output.analysis}\n"
-            f"Candidate: {output.candidate_answer}"
-        )
-        return f"{history}\n\n{new_item}".strip()
-
 
 def write_jsonl(path: Path, records: list[RunRecord]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)

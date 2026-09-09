@@ -39,10 +39,10 @@ def load_mmlu_pro(root: Path, split: str) -> Iterable[BenchmarkSample]:
             for letter, option in zip(string.ascii_uppercase, row["options"])
         ]
         text = (
-            f"Dataset: MMLU-Pro\n"
-            f"Category: {row['category']}\n"
-            f"Question: {row['question']}\n"
-            f"Options:\n" + "\n".join(options)
+            f"The following are multiple choice questions (with answers) about "
+            f"{row['category']}.\n"
+            f"{row['question']}\n"
+            + " ".join(options)
         )
         yield BenchmarkSample(
             uid=str(row["question_id"]),
@@ -61,10 +61,8 @@ def load_math500(root: Path, split: str) -> Iterable[BenchmarkSample]:
         for line in handle:
             row = json.loads(line)
             text = (
-                "Dataset: MATH-500\n"
-                f"Subject: {row.get('subject')}\n"
-                f"Level: {row.get('level')}\n"
-                f"Problem: {row['problem']}"
+                "Solve the following math problem carefully and return the final exact answer:\n"
+                + row["problem"]
             )
             yield BenchmarkSample(
                 uid=str(row["unique_id"]),
@@ -90,20 +88,20 @@ def load_chaosnli(root: Path, split: str) -> Iterable[BenchmarkSample]:
             if split == "alphanli":
                 example = row["example"]
                 text = (
-                    "Dataset: ChaosNLI AlphaNLI\n"
+                    "Choose which hypothesis best explains the observations.\n"
                     f"Observation 1: {example['obs1']}\n"
                     f"Observation 2: {example['obs2']}\n"
                     f"Hypothesis 1: {example['hyp1']}\n"
                     f"Hypothesis 2: {example['hyp2']}\n"
-                    "Choose which hypothesis is more plausible: entailment for hypothesis 1, "
-                    "contradiction for hypothesis 2, neutral if neither is clearly preferred."
+                    "Return exactly one label: entailment for hypothesis 1, "
+                    "contradiction for hypothesis 2."
                 )
             else:
                 text = (
-                    "Dataset: ChaosNLI\n"
+                    "Decide the NLI relation between premise and hypothesis.\n"
                     f"Premise: {row['premise']}\n"
                     f"Hypothesis: {row['hypothesis']}\n"
-                    "Labels: entailment, neutral, contradiction"
+                    "Return exactly one label: entailment, neutral, or contradiction."
                 )
             yield BenchmarkSample(
                 uid=str(row["uid"]),
