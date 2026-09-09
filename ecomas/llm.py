@@ -37,14 +37,14 @@ class LocalHFLLM:
         for param in self.model.parameters():
             param.requires_grad_(False)
 
-    def generate(self, system_prompt: str, user_prompt: str) -> str:
+    def generate(self, system_prompt: str, user_prompt: str, seed: int | None = None) -> str:
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
-        return self.generate_messages(messages)
+        return self.generate_messages(messages, seed=seed)
 
-    def generate_messages(self, messages: list[dict[str, str]]) -> str:
+    def generate_messages(self, messages: list[dict[str, str]], seed: int | None = None) -> str:
         text = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
@@ -61,25 +61,32 @@ class LocalHFLLM:
             ).to(device)
         finally:
             self.tokenizer.padding_side = original_padding_side
+        if seed is not None:
+            torch.manual_seed(seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(seed)
         with torch.inference_mode():
             output = self.model.generate(
                 **encoded,
                 do_sample=self.temperature > 0,
                 temperature=self.temperature if self.temperature > 0 else None,
                 top_p=0.9,
-                max_new_tokens=min(self.max_new_tokens, 96),
+                max_new_tokens=self.max_new_tokens,
                 pad_token_id=self.tokenizer.pad_token_id,
                 eos_token_id=self.tokenizer.eos_token_id,
-                use_cache=False,
+                use_cache=True,
             )
         generated = output[0][encoded["input_ids"].shape[-1]:]
-        return self.tokenizer.decode(generated, skip_special_tokens=True).strip()
+        response = self.tokenizer.decode(generated, skip_special_tokens=True).strip()
+        del output
+        del encoded
+        return response
 
 
 class MockLLM:
     """Fast deterministic backend for wiring tests; real experiments use LocalHFLLM."""
 
-    def generate(self, system_prompt: str, user_prompt: str) -> str:
+    def generate(self, system_prompt: str, user_prompt: str, seed: int | None = None) -> str:
         options = re.findall(r"\b([A-J])\s*:", user_prompt)
         if "entailment" in user_prompt.lower() and "hypothesis" in user_prompt.lower():
             answer = "neutral"
@@ -93,7 +100,7 @@ class MockLLM:
             f"CANDIDATE_ANSWER: {answer}"
         )
 
-    def generate_messages(self, messages: list[dict[str, str]]) -> str:
+    def generate_messages(self, messages: list[dict[str, str]], seed: int | None = None) -> str:
         return self.generate(
             messages[0]["content"] if messages else "",
             messages[-1]["content"] if messages else "",

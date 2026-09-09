@@ -10,6 +10,18 @@ tools and path branching:
 - each dataset owns a Puppeteer-compatible frozen Qwen state encoder plus trainable MLP router;
 - runs can be executed in train or inference mode.
 
+Inference supports deterministic greedy routing (the default) or categorical
+sampling from the MLP policy. Repeated runs can be requested to estimate an
+empirical final-answer distribution:
+
+```bash
+python main.py run --task mmlu_pro --router-mode sample --num-samples 32 --seed 0
+```
+
+The helpers in `ecomas.uncertainty` compute answer frequencies and second-order
+Tsallis entropy, `1 - sum_y p(y)^2`. Paired orchestration/execution
+decomposition is a separate next layer.
+
 ## Default Model
 
 The default LLM is local Qwen2.5-7B-Instruct:

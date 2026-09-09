@@ -5,6 +5,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+import torch
+
 from ecomas.agents import SpecialistAgent
 from ecomas.config import PROJECT_ROOT, RuntimeConfig
 from ecomas.datasets import load_samples
@@ -45,7 +47,8 @@ def build_runner(task_name: str, runtime: RuntimeConfig, checkpoint: Path | None
         runtime.device,
     )
     agent_names = [agent.spec.name for agent in agents]
-    router = ArgmaxRouter(task_name, agent_names, encoder.output_dim)
+    router_device = runtime.device if runtime.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
+    router = ArgmaxRouter(task_name, agent_names, encoder.output_dim, device=router_device)
     if load_checkpoint and checkpoint and checkpoint.exists():
         router.load(checkpoint)
     return agents, encoder, router
@@ -77,7 +80,7 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
             "a09a35458c702b33eeacc393d103063234e8bc28"
         ),
     )
-    parser.add_argument("--max-new-tokens", type=int, default=96)
+    parser.add_argument("--max-new-tokens", type=int, default=256)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--encoder-backend", choices=["hf"], default="hf")
     parser.add_argument("--device", default="auto")
@@ -103,6 +106,9 @@ def main() -> None:
     add_common_args(run_parser)
     run_parser.add_argument("--checkpoint", default=None)
     run_parser.add_argument("--require-checkpoint", action="store_true")
+    run_parser.add_argument("--router-mode", choices=["argmax", "sample"], default="argmax")
+    run_parser.add_argument("--num-samples", type=int, default=1)
+    run_parser.add_argument("--seed", type=int, default=0)
 
     train_parser = subparsers.add_parser("train")
     add_common_args(train_parser)
@@ -125,6 +131,8 @@ def main() -> None:
 
     if args.split is None:
         args.split = default_split(args.task)
+    if args.command == "run" and args.num_samples < 1:
+        raise ValueError("--num-samples must be at least 1")
     runtime = build_runtime(args)
     stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     mode = args.command
@@ -150,7 +158,8 @@ def main() -> None:
     result_path = run_dir / "results.jsonl"
 
     if args.command == "run":
-        records = run_inference(runner, samples, result_path)
+        records = run_inference(runner, samples, result_path, route_mode=args.router_mode,
+                                num_samples=args.num_samples, seed=args.seed)
     else:
         records = run_training(
             runner,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -23,6 +23,10 @@ class StepRecord:
     analysis: str
     candidate_answer: str
     raw_text: str
+    route_mode: str = "argmax"
+    generation_seed: int | None = None
+    route_seed: int | None = None
+    state_digest: str = ""
 
 
 @dataclass
@@ -36,6 +40,7 @@ class RunRecord:
     correct: bool
     steps: list[StepRecord]
     metadata: dict
+    path: list[str] = field(default_factory=list)
 
 
 class MASRunner:
@@ -57,7 +62,14 @@ class MASRunner:
         sample: BenchmarkSample,
         training: bool = False,
         loss_fn: Callable[[str, str, str], float] | None = None,
+        route_mode: str = "argmax",
+        generation_seed: int | None = None,
+        route_seed: int | None = None,
     ) -> tuple[RunRecord, torch.Tensor | None]:
+        if generation_seed is not None:
+            torch.manual_seed(generation_seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(generation_seed)
         for agent in self.agents.values():
             agent.reset()
 
@@ -74,14 +86,17 @@ class MASRunner:
 
         for step in range(1, int(self.task_config["steps"]) + 1):
             encoded = self.encoder([state_messages])
-            decision = self.router.decide(encoded)
+            current_route_seed = (route_seed + step - 1) if route_seed is not None else None
+            decision = self.router.decide(encoded, mode=route_mode, seed=current_route_seed)
             agent = self.agents[decision.agent_name]
             output: AgentOutput = agent.run(
                 sample.input_text,
                 previous_results,
                 str(self.task_config["display_name"]),
+                generation_seed=(generation_seed + step - 1) if generation_seed is not None else None,
             )
-            final_candidate = output.candidate_answer
+            if output.candidate_answer.strip():
+                final_candidate = output.candidate_answer
             log_probs.append(decision.log_prob)
             step_records.append(
                 StepRecord(
@@ -91,6 +106,10 @@ class MASRunner:
                     analysis=output.analysis,
                     candidate_answer=output.candidate_answer,
                     raw_text=output.raw_text,
+                    route_mode=route_mode,
+                    generation_seed=(generation_seed + step - 1) if generation_seed is not None else None,
+                    route_seed=current_route_seed,
+                    state_digest=_digest_messages(state_messages),
                 )
             )
             previous_results.append(
@@ -108,7 +127,13 @@ class MASRunner:
             normalized_prediction=normalize_answer(self.task_name, final_candidate),
             correct=correct,
             steps=step_records,
-            metadata=sample.metadata,
+            metadata={
+                **sample.metadata,
+                "route_mode": route_mode,
+                "generation_seed": generation_seed,
+                "output_parse_valid": bool(final_candidate.strip()),
+            },
+            path=[step.agent_name for step in step_records],
         )
         loss = None
         if training:
@@ -122,3 +147,10 @@ def write_jsonl(path: Path, records: list[RunRecord]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         for record in records:
             handle.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
+
+
+def _digest_messages(messages: list[dict[str, str]]) -> str:
+    import hashlib
+
+    payload = json.dumps(messages, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:16]

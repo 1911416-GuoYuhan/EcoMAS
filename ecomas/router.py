@@ -5,6 +5,7 @@ from pathlib import Path
 
 import torch
 from torch import nn
+from abc import ABC, abstractmethod
 
 
 class RouterMLP(nn.Module):
@@ -34,17 +35,34 @@ class RouterDecision:
     log_prob: torch.Tensor
 
 
-class ArgmaxRouter:
+class RouterPolicy(ABC):
+    """Common policy interface for deterministic and stochastic routing."""
+
+    @abstractmethod
+    def decide(self, encoded_state: torch.Tensor, mode: str = "argmax", seed: int | None = None) -> RouterDecision:
+        raise NotImplementedError
+
+
+class ArgmaxRouter(RouterPolicy):
     def __init__(self, task_name: str, agent_names: list[str], input_dim: int, device: str = "cpu") -> None:
         self.task_name = task_name
         self.agent_names = agent_names
         self.device = torch.device(device)
         self.model = RouterMLP(input_dim, len(agent_names)).to(self.device)
 
-    def decide(self, encoded_state: torch.Tensor) -> RouterDecision:
+    def decide(self, encoded_state: torch.Tensor, mode: str = "argmax", seed: int | None = None) -> RouterDecision:
+        if mode not in {"argmax", "sample"}:
+            raise ValueError(f"Unknown router mode: {mode}")
         encoded_state = encoded_state.to(self.device)
         probs = self.model(encoded_state)
-        idx = int(torch.argmax(probs, dim=-1).item())
+        if mode == "argmax":
+            idx = int(torch.argmax(probs, dim=-1).item())
+        else:
+            generator = None
+            if seed is not None:
+                generator = torch.Generator(device=self.device)
+                generator.manual_seed(seed)
+            idx = int(torch.multinomial(probs.squeeze(0), num_samples=1, generator=generator).item())
         return RouterDecision(
             agent_index=idx,
             agent_name=self.agent_names[idx],

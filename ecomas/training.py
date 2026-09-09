@@ -21,12 +21,22 @@ LOSS_REGISTRY = {
 }
 
 
-def run_inference(runner: MASRunner, samples: list[BenchmarkSample], result_path: Path) -> list[RunRecord]:
+def run_inference(runner: MASRunner, samples: list[BenchmarkSample], result_path: Path,
+                  route_mode: str = "argmax", num_samples: int = 1, seed: int = 0) -> list[RunRecord]:
     records: list[RunRecord] = []
     for sample in tqdm(samples, desc=f"infer:{runner.task_name}"):
-        record, _ = runner.run_sample(sample, training=False)
-        records.append(record)
+        for sample_index in range(num_samples):
+            record, _ = runner.run_sample(sample, training=False, route_mode=route_mode,
+                                          generation_seed=seed + sample_index,
+                                          route_seed=seed + sample_index)
+            records.append(record)
     write_jsonl(result_path, records)
+    if num_samples > 1:
+        import json
+        from ecomas.uncertainty import grouped_answer_reports
+
+        report_path = result_path.with_name("uncertainty.json")
+        report_path.write_text(json.dumps(grouped_answer_reports(records), ensure_ascii=False, indent=2), encoding="utf-8")
     return records
 
 
