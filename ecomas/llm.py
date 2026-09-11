@@ -56,7 +56,7 @@ class LocalHFLLM:
                 [text],
                 return_tensors="pt",
                 truncation=True,
-                max_length=1024,
+                max_length=2048,
                 padding=True,
             ).to(device)
         finally:
@@ -70,7 +70,8 @@ class LocalHFLLM:
                 **encoded,
                 do_sample=self.temperature > 0,
                 temperature=self.temperature if self.temperature > 0 else None,
-                top_p=0.9,
+                top_p=0.9 if self.temperature > 0 else None,
+                top_k=20 if self.temperature > 0 else None,
                 max_new_tokens=self.max_new_tokens,
                 pad_token_id=self.tokenizer.pad_token_id,
                 eos_token_id=self.tokenizer.eos_token_id,
@@ -101,10 +102,11 @@ class MockLLM:
         )
 
     def generate_messages(self, messages: list[dict[str, str]], seed: int | None = None) -> str:
-        return self.generate(
-            messages[0]["content"] if messages else "",
-            messages[-1]["content"] if messages else "",
+        system_prompt = "\n".join(
+            str(message.get("content", "")) for message in messages if message.get("role") == "system"
         )
+        user_prompt = "\n".join(str(message.get("content", "")) for message in messages)
+        return self.generate(system_prompt, user_prompt, seed=seed)
 
 
 def build_llm(backend: str, model_path: Path, max_new_tokens: int, temperature: float, device: str):

@@ -58,7 +58,7 @@ class PuppeteerStateEncoder(FrozenTextEncoder):
             return_tensors="pt",
             return_dict=True,
             truncation=True,
-            max_length=1024,
+            max_length=2048,
         )
 
     def forward(self, message_batches: list[list[dict[str, Any]]]) -> torch.Tensor:

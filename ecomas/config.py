@@ -20,7 +20,7 @@ class RuntimeConfig:
     checkpoint_root: Path = PROJECT_ROOT / "checkpoints"
     llm_backend: str = "local_hf"
     llm_model_path: Path = DEFAULT_QWEN_PATH
-    max_new_tokens: int = 256
+    max_new_tokens: int = 768
     temperature: float = 0.0
     encoder_backend: str = "hf"
     device: str = "auto"

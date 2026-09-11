@@ -33,8 +33,31 @@ The default LLM is local Qwen2.5-7B-Instruct:
 The router state encoder always uses the Puppeteer-compatible Qwen path:
 `apply_chat_template(..., add_generation_prompt=False)` followed by the last
 valid token hidden state. There is no hash or mean-pooling fallback.
-Specialist generation also follows Puppeteer's 1024-token context and 96-token
-generation limit.
+Specialist generation uses Puppeteer's 2048-token context and a configurable
+generation limit that defaults to 768 tokens.
+
+## Output Integrity
+
+EcoMAS treats answer extraction as part of the experimental protocol rather
+than as a permissive text heuristic. MMLU-Pro accepts only A-J, and ChaosNLI
+accepts only entailment, neutral, or contradiction. Math answers must be
+explicitly marked or boxed and prompt placeholders are rejected. Invalid text
+is normalized to one task-specific `invalid::<task>` outcome so unrelated
+prompt fragments cannot create artificial answer clusters or uncertainty.
+
+Every step records `parse_valid`, `protocol_valid`, and `parse_error` so a
+reliably extractable answer remains distinguishable from exact output-format
+compliance. A run also records whether the terminal step was parseable and
+protocol-compliant, which step supplied the final valid answer, and whether the
+documented last-valid-answer fallback was used. Previous-agent evidence is
+passed as bounded structured text instead of nested raw Python lists,
+preventing prompt instructions and placeholders from recursively leaking into
+later agent outputs.
+
+CLI summaries report task accuracy together with final/terminal/step parse
+rates, exact protocol-compliance rates, fallback rates, accuracy among parsed
+outputs, and the answer-matching methods used. Accuracy and output integrity
+must be interpreted together; neither metric substitutes for the other.
 
 ## Quick Checks
 

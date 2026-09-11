@@ -57,10 +57,35 @@ def build_runner(task_name: str, runtime: RuntimeConfig, checkpoint: Path | None
 def summarize(records) -> dict:
     total = len(records)
     correct = sum(1 for record in records if record.correct)
+    parsed = sum(1 for record in records if record.output_parse_valid)
+    terminal_parsed = sum(1 for record in records if record.terminal_step_parse_valid)
+    protocol = sum(1 for record in records if record.terminal_step_protocol_valid)
+    fallback = sum(1 for record in records if record.used_answer_fallback)
+    total_steps = sum(len(record.steps) for record in records)
+    parsed_steps = sum(step.parse_valid for record in records for step in record.steps)
+    protocol_steps = sum(step.protocol_valid for record in records for step in record.steps)
+    parsed_correct = sum(1 for record in records if record.output_parse_valid and record.correct)
+    methods = {}
+    for record in records:
+        methods[record.match_method] = methods.get(record.match_method, 0) + 1
     return {
         "total": total,
         "correct": correct,
         "accuracy": correct / total if total else 0.0,
+        "parse_valid": parsed,
+        "parse_valid_rate": parsed / total if total else 0.0,
+        "terminal_parse_valid": terminal_parsed,
+        "terminal_parse_valid_rate": terminal_parsed / total if total else 0.0,
+        "terminal_protocol_valid": protocol,
+        "terminal_protocol_valid_rate": protocol / total if total else 0.0,
+        "used_answer_fallback": fallback,
+        "used_answer_fallback_rate": fallback / total if total else 0.0,
+        "step_parse_valid": parsed_steps,
+        "step_parse_valid_rate": parsed_steps / total_steps if total_steps else 0.0,
+        "step_protocol_valid": protocol_steps,
+        "step_protocol_valid_rate": protocol_steps / total_steps if total_steps else 0.0,
+        "correct_among_parse_valid": parsed_correct / parsed if parsed else 0.0,
+        "match_methods": methods,
     }
 
 
@@ -80,7 +105,7 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
             "a09a35458c702b33eeacc393d103063234e8bc28"
         ),
     )
-    parser.add_argument("--max-new-tokens", type=int, default=256)
+    parser.add_argument("--max-new-tokens", type=int, default=768)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--encoder-backend", choices=["hf"], default="hf")
     parser.add_argument("--device", default="auto")
@@ -94,6 +119,11 @@ def default_split(task: str) -> str:
     if task == "chaosnli":
         return "mnli_m"
     raise ValueError(task)
+
+
+def default_checkpoint(task: str, checkpoint_root: Path) -> Path:
+    pretrained = sorted((PROJECT_ROOT / "pretrained" / task).glob("*.pt"))
+    return pretrained[-1] if pretrained else checkpoint_root / task / "router.pt"
 
 
 def main() -> None:
@@ -140,7 +170,7 @@ def main() -> None:
     checkpoint_path = (
         Path(args.checkpoint)
         if getattr(args, "checkpoint", None)
-        else runtime.checkpoint_root / args.task / "router.pt"
+        else default_checkpoint(args.task, runtime.checkpoint_root)
     )
     samples = load_samples(args.task, runtime.benchmark_root, args.split, args.limit)
     if args.command == "run" and args.require_checkpoint and not checkpoint_path.exists():
