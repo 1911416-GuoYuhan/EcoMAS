@@ -32,6 +32,10 @@ def load_samples(task_name: str, benchmark_root: Path, split: str, limit: int | 
 
 def load_mmlu_pro(root: Path, split: str) -> Iterable[BenchmarkSample]:
     path = root / "mmlupro" / f"{split}.parquet"
+    if not path.exists():
+        candidate = root / "mmlupro" / "split_60_20_20" / f"{split}.parquet"
+        if candidate.exists():
+            path = candidate
     frame = pd.read_parquet(path)
     for _, row in frame.iterrows():
         options = [
@@ -54,9 +58,11 @@ def load_mmlu_pro(root: Path, split: str) -> Iterable[BenchmarkSample]:
 
 
 def load_math500(root: Path, split: str) -> Iterable[BenchmarkSample]:
-    if split != "test":
-        raise ValueError("MATH-500 only provides split 'test' in this benchmark directory")
-    path = root / "math500" / "test.jsonl"
+    path = root / "math500" / f"{split}.jsonl"
+    if not path.exists():
+        path = root / "math500" / "split_300_100_100" / f"{split}.jsonl"
+    if not path.exists():
+        raise ValueError(f"MATH-500 split not found: {split}")
     with path.open("r", encoding="utf-8") as handle:
         for line in handle:
             row = json.loads(line)
@@ -79,9 +85,12 @@ def load_chaosnli(root: Path, split: str) -> Iterable[BenchmarkSample]:
         "snli": "chaosNLI_snli.jsonl",
         "alphanli": "chaosNLI_alphanli.jsonl",
     }
-    if split not in split_map:
-        raise ValueError(f"ChaosNLI split must be one of {sorted(split_map)}")
-    path = root / "chaosnli" / split_map[split]
+    if split in {"train", "validation", "test"}:
+        path = root / "chaosnli" / "split_60_20_20" / f"{split}.jsonl"
+    else:
+        if split not in split_map:
+            raise ValueError(f"ChaosNLI split must be one of {sorted(split_map)} or train/validation/test")
+        path = root / "chaosnli" / split_map[split]
     with path.open("r", encoding="utf-8") as handle:
         for line in handle:
             row = json.loads(line)

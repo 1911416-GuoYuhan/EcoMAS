@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
@@ -24,6 +25,7 @@ def build_runtime(args: argparse.Namespace) -> RuntimeConfig:
         checkpoint_root=Path(args.checkpoint_root),
         llm_backend=args.llm_backend,
         llm_model_path=Path(args.llm_model_path),
+        encoder_model_path=Path(args.encoder_model_path) if args.encoder_model_path else None,
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
         encoder_backend=args.encoder_backend,
@@ -43,7 +45,7 @@ def build_runner(task_name: str, runtime: RuntimeConfig, checkpoint: Path | None
     agents = [SpecialistAgent(spec, llm) for spec in task_cfg["agents"]]
     encoder = build_encoder(
         runtime.encoder_backend,
-        runtime.llm_model_path,
+        runtime.encoder_model_path or runtime.llm_model_path,
         runtime.device,
     )
     agent_names = [agent.spec.name for agent in agents]
@@ -105,6 +107,7 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
             "a09a35458c702b33eeacc393d103063234e8bc28"
         ),
     )
+    parser.add_argument("--encoder-model-path", default=None)
     parser.add_argument("--max-new-tokens", type=int, default=768)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--encoder-backend", choices=["hf"], default="hf")
@@ -126,6 +129,11 @@ def default_checkpoint(task: str, checkpoint_root: Path) -> Path:
     return pretrained[-1] if pretrained else checkpoint_root / task / "router.pt"
 
 
+def pretrained_checkpoint(task: str) -> Path | None:
+    candidates = sorted((PROJECT_ROOT / "pretrained" / task).glob("*.pt"))
+    return candidates[-1] if candidates else None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="ecoMAS benchmark runner")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -144,7 +152,11 @@ def main() -> None:
     add_common_args(train_parser)
     train_parser.add_argument("--epochs", type=int, default=1)
     train_parser.add_argument("--lr", type=float, default=1e-3)
-    train_parser.add_argument("--loss", choices=["accuracy"], default="accuracy")
+    train_parser.add_argument("--loss", choices=["calibration", "accuracy", "mixed"], default="calibration")
+    train_parser.add_argument("--calibration-samples", type=int, default=4)
+    train_parser.add_argument("--seed", type=int, default=0)
+    train_parser.add_argument("--test-split", default="test")
+    train_parser.add_argument("--test-limit", type=int, default=None)
 
     args = parser.parse_args()
     if args.command == "list-tasks":
@@ -167,11 +179,12 @@ def main() -> None:
     stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     mode = args.command
     run_dir = runtime.output_root / args.task / mode / stamp
-    checkpoint_path = (
-        Path(args.checkpoint)
-        if getattr(args, "checkpoint", None)
-        else default_checkpoint(args.task, runtime.checkpoint_root)
-    )
+    if args.command == "train":
+        checkpoint_path = runtime.checkpoint_root / args.task / "router.pt"
+        init_checkpoint = pretrained_checkpoint(args.task)
+    else:
+        checkpoint_path = Path(args.checkpoint) if getattr(args, "checkpoint", None) else default_checkpoint(args.task, runtime.checkpoint_root)
+        init_checkpoint = checkpoint_path
     samples = load_samples(args.task, runtime.benchmark_root, args.split, args.limit)
     if args.command == "run" and args.require_checkpoint and not checkpoint_path.exists():
         raise FileNotFoundError(f"Router checkpoint not found: {checkpoint_path}")
@@ -179,18 +192,20 @@ def main() -> None:
     agents, encoder, router = build_runner(
         args.task,
         runtime,
-        checkpoint_path,
-        load_checkpoint=(args.command == "run"),
+        init_checkpoint,
+        load_checkpoint=bool(init_checkpoint and init_checkpoint.exists()),
     )
     from ecomas.runner import MASRunner
 
     runner = MASRunner(args.task, agents, encoder, router)
     result_path = run_dir / "results.jsonl"
+    calibration_report_path = None
 
     if args.command == "run":
         records = run_inference(runner, samples, result_path, route_mode=args.router_mode,
                                 num_samples=args.num_samples, seed=args.seed)
     else:
+        pre_calibration_state = deepcopy(router.model.state_dict())
         records = run_training(
             runner,
             samples,
@@ -199,7 +214,25 @@ def main() -> None:
             epochs=args.epochs,
             lr=args.lr,
             loss_name=args.loss,
+            calibration_samples=getattr(args, "calibration_samples", 4),
+            seed=getattr(args, "seed", 0),
         )
+        if args.loss in {"calibration", "mixed"}:
+            from ecomas.training import evaluate_calibration
+            test_samples = load_samples(args.task, runtime.benchmark_root, args.test_split, args.test_limit or args.limit)
+            post_metrics = evaluate_calibration(router, test_samples, num_samples=max(2, args.calibration_samples), seed=args.seed)
+            router.model.load_state_dict(pre_calibration_state)
+            pre_metrics = evaluate_calibration(router, test_samples, num_samples=max(2, args.calibration_samples), seed=args.seed)
+            router.load(checkpoint_path)
+            calibration_report = {
+                "task": args.task,
+                "train_split": args.split,
+                "test_split": args.test_split,
+                "before": {key: value for key, value in pre_metrics.items() if key != "records"},
+                "after": {key: value for key, value in post_metrics.items() if key != "records"},
+            }
+            calibration_report_path = run_dir / "calibration_report.json"
+            calibration_report_path.write_text(json.dumps(calibration_report, ensure_ascii=False, indent=2), encoding="utf-8")
 
     summary = summarize(records)
     summary.update(
@@ -213,6 +246,8 @@ def main() -> None:
             "encoder_backend": runtime.encoder_backend,
         }
     )
+    if calibration_report_path is not None:
+        summary["calibration_report_path"] = str(calibration_report_path)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
 

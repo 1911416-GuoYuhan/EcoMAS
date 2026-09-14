@@ -29,6 +29,8 @@ class PuppeteerStateEncoder(FrozenTextEncoder):
             torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
             device_map=device_map,
         )
+        if device != "auto":
+            self.model.to(torch.device(device))
         self.model.eval()
         for param in self.model.parameters():
             param.requires_grad_(False)

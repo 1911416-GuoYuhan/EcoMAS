@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -117,8 +117,13 @@ class MASRunner:
         )
         if key in self.branch_cache:
             return self.branch_cache[key]
+        # Branches may run concurrently.  Use shallow agent copies so the
+        # frozen LLM is shared, while each branch owns its dialog history.
+        branch_agents = {}
         for name, history in snapshot.agent_histories.items():
-            self.agents[name].dialog_history = deepcopy(history)
+            branch_agent = copy(self.agents[name])
+            branch_agent.dialog_history = deepcopy(history)
+            branch_agents[name] = branch_agent
         state_messages = deepcopy(snapshot.state_messages)
         previous_results = deepcopy(snapshot.previous_results)
         final_candidate = ""
@@ -129,7 +134,7 @@ class MASRunner:
                 mode=route_mode,
                 seed=(route_seed + offset) if route_seed is not None else None,
             )
-            agent = self.agents[forced_agent] if step == snapshot.step and forced_agent else self.agents[decision.agent_name]
+            agent = branch_agents[forced_agent] if step == snapshot.step and forced_agent else branch_agents[decision.agent_name]
             if step == snapshot.step and forced_output is not None:
                 raw_text = forced_output
                 analysis, candidate = parse_agent_response(raw_text, self.task_config["display_name"])
@@ -184,6 +189,7 @@ class MASRunner:
         final_candidate = ""
         answer_source_step: int | None = None
         self.last_snapshots: list[ContextSnapshot] = []
+        self.last_route_log_probs: list[torch.Tensor] = []
 
         for step in range(1, int(self.task_config["steps"]) + 1):
             self.last_snapshots.append(self.snapshot(sample, step, state_messages, previous_results))
@@ -202,6 +208,7 @@ class MASRunner:
                 final_candidate = output.candidate_answer
                 answer_source_step = step
             log_probs.append(decision.log_prob)
+            self.last_route_log_probs.append(decision.log_prob)
             step_records.append(
                 StepRecord(
                     step=step,

@@ -33,6 +33,8 @@ class LocalHFLLM:
             device_map=device_map,
             low_cpu_mem_usage=True,
         )
+        if device != "auto":
+            self.model.to(torch.device(device))
         self.model.eval()
         for param in self.model.parameters():
             param.requires_grad_(False)
