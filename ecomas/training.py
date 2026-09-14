@@ -31,12 +31,32 @@ def run_inference(runner: MASRunner, samples: list[BenchmarkSample], result_path
                                           route_seed=seed + sample_index)
             records.append(record)
     write_jsonl(result_path, records)
+    import json
+    from ecomas.uncertainty import grouped_answer_reports, semantic_cluster_report
     if num_samples > 1:
-        import json
-        from ecomas.uncertainty import grouped_answer_reports
-
         report_path = result_path.with_name("uncertainty.json")
         report_path.write_text(json.dumps(grouped_answer_reports(records), ensure_ascii=False, indent=2), encoding="utf-8")
+    by_uid: dict[str, list[dict[str, object]]] = {}
+    for index, record in enumerate(records):
+        by_uid.setdefault(str(record.uid), []).append({
+            "output_id": f"run-{index}",
+            "raw_answer": record.prediction,
+            "normalized_prediction": record.normalized_prediction,
+            "parse_valid": record.output_parse_valid,
+        })
+    sample_by_uid = {str(sample.uid): sample for sample in samples}
+    semantic_reports = {
+        uid: semantic_cluster_report(
+            runner.task_name,
+            uid,
+            answers,
+            question=sample_by_uid[uid].input_text if uid in sample_by_uid else "",
+        )
+        for uid, answers in sorted(by_uid.items())
+    }
+    result_path.with_name("semantic_clusters.json").write_text(
+        json.dumps(semantic_reports, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     return records
 
 

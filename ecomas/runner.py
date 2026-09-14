@@ -83,9 +83,38 @@ class MASRunner:
         return ContextSnapshot(sample, step, deepcopy(state_messages), deepcopy(previous_results),
                                {name: deepcopy(agent.dialog_history) for name, agent in self.agents.items()})
 
-    def continue_from_snapshot(self, snapshot: ContextSnapshot, forced_agent: str | None = None,
-                               forced_output: str | None = None, seed: int | None = None) -> str:
-        key = (snapshot.sample.uid, snapshot.step, forced_agent, forced_output, seed)
+    def continue_from_snapshot(
+        self,
+        snapshot: ContextSnapshot,
+        forced_agent: str | None = None,
+        forced_output: str | None = None,
+        seed: int | None = None,
+        *,
+        route_mode: str = "sample",
+        route_seed: int | None = None,
+        generation_seed: int | None = None,
+    ) -> str:
+        """Run only the suffix under an explicit conditional policy.
+
+        ``route_mode`` selects either categorical sampling or argmax for every
+        unfixed route in the suffix. ``seed`` remains a backwards-compatible
+        shorthand for both seed roots.
+        """
+        if seed is not None:
+            route_seed = seed if route_seed is None else route_seed
+            generation_seed = seed if generation_seed is None else generation_seed
+        if route_mode not in {"argmax", "sample"}:
+            raise ValueError(f"Unknown route mode: {route_mode}")
+        snapshot_payload = (
+            snapshot.state_messages,
+            snapshot.previous_results,
+            snapshot.agent_histories,
+        )
+        key = (
+            snapshot.sample.uid, snapshot.step, forced_agent, forced_output,
+            route_mode, route_seed, generation_seed,
+            _digest_object(snapshot_payload),
+        )
         if key in self.branch_cache:
             return self.branch_cache[key]
         for name, history in snapshot.agent_histories.items():
@@ -94,7 +123,12 @@ class MASRunner:
         previous_results = deepcopy(snapshot.previous_results)
         final_candidate = ""
         for step in range(snapshot.step, int(self.task_config["steps"]) + 1):
-            decision = self.router.decide(self.encoder([state_messages]), mode="argmax", seed=seed)
+            offset = step - snapshot.step
+            decision = self.router.decide(
+                self.encoder([state_messages]),
+                mode=route_mode,
+                seed=(route_seed + offset) if route_seed is not None else None,
+            )
             agent = self.agents[forced_agent] if step == snapshot.step and forced_agent else self.agents[decision.agent_name]
             if step == snapshot.step and forced_output is not None:
                 raw_text = forced_output
@@ -113,7 +147,7 @@ class MASRunner:
             else:
                 output = agent.run(snapshot.sample.input_text, previous_results,
                                    str(self.task_config["display_name"]),
-                                   generation_seed=(seed + step - snapshot.step) if seed is not None else None,
+                                   generation_seed=(generation_seed + offset) if generation_seed is not None else None,
                                    is_final_step=(step == int(self.task_config["steps"])))
             if output.parse_valid:
                 final_candidate = output.candidate_answer
@@ -234,6 +268,13 @@ def _digest_messages(messages: list[dict[str, str]]) -> str:
     import hashlib
 
     payload = json.dumps(messages, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:16]
+
+
+def _digest_object(value: object) -> str:
+    import hashlib
+
+    payload = repr(value).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()[:16]
 
 

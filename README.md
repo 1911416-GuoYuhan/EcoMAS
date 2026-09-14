@@ -76,6 +76,15 @@ CUDA_VISIBLE_DEVICES=0 TOKENIZERS_PARALLELISM=false \
 ```
 
 Results are written to `runs/<task>/<mode>/<timestamp>/results.jsonl`.
+
+Each inference run also writes `semantic_clusters.json`. EcoMAS first collects
+all final answers for each question, maps them through one symbolic semantic
+interface with task-specific adapters, builds the complete bidirectional
+entailment/equivalence matrices, and only then freezes complete-link clusters.
+MMLU-Pro and ChaosNLI use symbolic task labels; MATH-500 uses structured SymPy
+representations with deterministic normalized-text symbols as a total fallback.
+The paired sampler uses the resulting question-local same-cluster kernel after
+all main and C/R/Z continuation outputs have been collected.
 Puppeteer policy checkpoints can be loaded directly with `--checkpoint`.
 New EcoMAS checkpoints use the same `model_state_dict`, `input_dim`, and
 `output_dim` format.

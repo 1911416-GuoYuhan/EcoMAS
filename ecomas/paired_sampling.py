@@ -1,7 +1,6 @@
 """Paired continuation estimators from the EcoMAS uncertainty decomposition."""
 
 from dataclasses import dataclass
-from math import comb, exp, floor, log, sqrt
 from typing import Callable, Hashable, Sequence
 
 
@@ -28,7 +27,20 @@ class PairedEstimate:
         return sum(self.orchestration) + sum(self.agent_execution)
 
 
-def same_cluster(left: object, right: object, cluster_fn: Callable[[object], Hashable] = lambda x: x) -> int:
+def same_cluster(
+    left: object,
+    right: object,
+    cluster_fn: Callable[[object], Hashable] = lambda x: x,
+    cluster_kernel: Callable[[object, object], bool] | None = None,
+) -> int:
+    """Return the binary semantic kernel used by the estimators.
+
+    ``cluster_kernel`` is preferred for question-conditioned semantic
+    clustering. ``cluster_fn`` remains as a compatibility path for exact
+    symbolic keys and existing callers.
+    """
+    if cluster_kernel is not None:
+        return int(bool(cluster_kernel(left, right)))
     return int(cluster_fn(left) == cluster_fn(right))
 
 
@@ -42,11 +54,15 @@ class PairedSampler:
     """
 
     def __init__(self, sample_main: Callable[[], Trajectory], continue_from: Callable[..., object],
-                 horizon: int, cluster_fn: Callable[[object], Hashable] = lambda x: x) -> None:
+                 horizon: int, cluster_fn: Callable[[object], Hashable] = lambda x: x,
+                 cluster_kernel: Callable[[object, object], bool] | None = None,
+                 batch_cluster_fn: Callable[[Sequence[object]], Sequence[Hashable]] | None = None) -> None:
         self.sample_main = sample_main
         self.continue_from = continue_from
         self.horizon = horizon
         self.cluster_fn = cluster_fn
+        self.cluster_kernel = cluster_kernel
+        self.batch_cluster_fn = batch_cluster_fn
 
     def estimate(self, num_trajectories: int) -> PairedEstimate:
         if num_trajectories < 1:
@@ -54,7 +70,10 @@ class PairedSampler:
         mains = [self.sample_main() for _ in range(num_trajectories)]
         orch = [[] for _ in range(self.horizon)]
         agent = [[] for _ in range(self.horizon)]
+        all_outputs: list[object] = [trajectory.final_output for trajectory in mains]
+        branch_indices: list[list[tuple[int, int, int]]] = []
         for trajectory in mains:
+            trajectory_branches: list[tuple[int, int, int]] = []
             for step in range(self.horizon):
                 context = trajectory.contexts[step]
                 action = trajectory.actions[step]
@@ -64,11 +83,27 @@ class PairedSampler:
                 y_z = trajectory.final_output if step == self.horizon - 1 else self.continue_from(
                     context, action=action, output=output
                 )
-                orch[step].append(same_cluster(trajectory.final_output, y_r, self.cluster_fn)
-                                  - same_cluster(trajectory.final_output, y_c, self.cluster_fn))
-                agent[step].append(same_cluster(trajectory.final_output, y_z, self.cluster_fn)
-                                   - same_cluster(trajectory.final_output, y_r, self.cluster_fn))
-        pair_values = [1 - same_cluster(mains[i].final_output, mains[j].final_output, self.cluster_fn)
+                indices = []
+                for value in (y_c, y_r, y_z):
+                    indices.append(len(all_outputs))
+                    all_outputs.append(value)
+                trajectory_branches.append(tuple(indices))
+            branch_indices.append(trajectory_branches)
+
+        cluster_ids = list(self.batch_cluster_fn(all_outputs)) if self.batch_cluster_fn else None
+        if cluster_ids is not None and len(cluster_ids) != len(all_outputs):
+            raise ValueError("batch_cluster_fn must return one cluster ID per collected output")
+
+        def kernel(left_index: int, right_index: int) -> int:
+            if cluster_ids is not None:
+                return int(cluster_ids[left_index] == cluster_ids[right_index])
+            return same_cluster(all_outputs[left_index], all_outputs[right_index], self.cluster_fn, self.cluster_kernel)
+
+        for main_index in range(num_trajectories):
+            for step, (c_index, r_index, z_index) in enumerate(branch_indices[main_index]):
+                orch[step].append(kernel(main_index, r_index) - kernel(main_index, c_index))
+                agent[step].append(kernel(main_index, z_index) - kernel(main_index, r_index))
+        pair_values = [1 - kernel(i, j)
                        for i in range(num_trajectories) for j in range(i + 1, num_trajectories)]
         system = sum(pair_values) / len(pair_values) if pair_values else 0.0
         return PairedEstimate(
@@ -82,10 +117,31 @@ class PairedSampler:
         )
 
 
-def runner_paired_sampler(runner, sample, cluster_fn=lambda x: x) -> PairedSampler:
+def runner_paired_sampler(
+    runner,
+    sample,
+    cluster_fn=lambda x: x,
+    *,
+    route_mode: str = "sample",
+    seed: int = 0,
+) -> PairedSampler:
     """Build a paired estimator backed by a real MASRunner."""
+    call_index = 0
+
+    def next_seed() -> int:
+        nonlocal call_index
+        value = seed + call_index
+        call_index += 1
+        return value
+
     def sample_main() -> Trajectory:
-        record, _ = runner.run_sample(sample, route_mode="sample")
+        root = next_seed()
+        record, _ = runner.run_sample(
+            sample,
+            route_mode=route_mode,
+            generation_seed=root,
+            route_seed=root,
+        )
         snapshots = list(runner.last_snapshots)
         return Trajectory(
             contexts=snapshots,
@@ -95,27 +151,32 @@ def runner_paired_sampler(runner, sample, cluster_fn=lambda x: x) -> PairedSampl
         )
 
     def continue_from(snapshot, action=None, output=None):
+        root = next_seed()
         final = runner.continue_from_snapshot(
             snapshot,
             forced_agent=str(action) if action is not None else None,
             forced_output=str(output) if output is not None else None,
+            route_mode=route_mode,
+            route_seed=root,
+            generation_seed=root,
         )
         return final
 
-    return PairedSampler(sample_main, continue_from, int(runner.task_config["steps"]), cluster_fn)
+    def batch_cluster(outputs):
+        from ecomas.semantic_clustering import cluster_answers
 
+        result = cluster_answers(
+            runner.task_name,
+            str(sample.uid),
+            [{"output_id": str(index), "answer": value} for index, value in enumerate(outputs)],
+            question=sample.input_text,
+        )
+        return [result.cluster_by_output_id[str(index)] for index in range(len(outputs))]
 
-def hoeffding_radius(num_trajectories: int, delta: float, horizon: int) -> float:
-    """Return the paper's uniform stepwise radius sqrt(2 log(4T/delta)/B)."""
-    if num_trajectories < 1 or horizon < 1 or not 0 < delta < 1:
-        raise ValueError("invalid concentration arguments")
-    return sqrt(2 * log(4 * horizon / delta) / num_trajectories)
-
-
-def bernstein_bound(num_trajectories: int, epsilon: float, beta: float, estimate: float = 0.0) -> float:
-    variance = max(0.0, beta - estimate * estimate)
-    return 2 * exp(-num_trajectories * epsilon * epsilon / (2 * variance + 4 * epsilon / 3))
-
-
-def system_hoeffding_bound(num_trajectories: int, epsilon: float) -> float:
-    return 2 * exp(-2 * floor(num_trajectories / 2) * epsilon * epsilon)
+    return PairedSampler(
+        sample_main,
+        continue_from,
+        int(runner.task_config["steps"]),
+        cluster_fn,
+        batch_cluster_fn=batch_cluster,
+    )
