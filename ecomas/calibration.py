@@ -216,10 +216,7 @@ def estimate_paired_calibration_gradient(
     target = q_star.detach().to(features)
     q_theta = features.mean(dim=0)
     loss = torch.sum((q_theta - target) ** 2)
-    terms = []
-    for b in range(bsz):
-        q_loo = (features.sum(dim=0) - features[b]) / (bsz - 1)
-        for step in range(horizon):
-            delta = 2.0 * torch.dot(q_loo - target, branches[b, step, 1] - branches[b, step, 0])
-            terms.append(delta.detach() * route_log_probs[b, step])
-    return loss, torch.stack(terms).mean()
+    q_loo = (features.sum(dim=0, keepdim=True) - features) / (bsz - 1)
+    branch_delta = branches[:, :, 1, :] - branches[:, :, 0, :]
+    advantages = 2.0 * torch.einsum("bd,btd->bt", q_loo - target.unsqueeze(0), branch_delta)
+    return loss, (advantages.detach() * route_log_probs).mean()

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 import torch
 
@@ -85,6 +85,47 @@ class LocalHFLLM:
         del encoded
         return response
 
+    def generate_messages_batch(
+        self, batch_messages: Sequence[list[dict[str, str]]], *,
+        micro_batch_size: int = 2, seed: int | None = None,
+    ) -> list[str]:
+        """Bounded batch generation without concurrent model calls."""
+        if micro_batch_size < 1:
+            raise ValueError("micro_batch_size must be positive")
+        messages = list(batch_messages)
+        results: list[str] = []
+        for start in range(0, len(messages), micro_batch_size):
+            chunk = messages[start:start + micro_batch_size]
+            texts = [self.tokenizer.apply_chat_template(m, tokenize=False, add_generation_prompt=True) for m in chunk]
+            device = next(self.model.parameters()).device
+            old_side = getattr(self.tokenizer, "padding_side", "right")
+            self.tokenizer.padding_side = "left"
+            try:
+                encoded = self.tokenizer(texts, return_tensors="pt", truncation=True, max_length=2048, padding=True).to(device)
+            finally:
+                self.tokenizer.padding_side = old_side
+            if seed is not None:
+                torch.manual_seed(seed + start)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(seed + start)
+            with torch.inference_mode():
+                output = self.model.generate(
+                    **encoded, do_sample=self.temperature > 0,
+                    temperature=self.temperature if self.temperature > 0 else None,
+                    top_p=0.9 if self.temperature > 0 else None,
+                    top_k=20 if self.temperature > 0 else None,
+                    max_new_tokens=self.max_new_tokens,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                    eos_token_id=self.tokenizer.eos_token_id, use_cache=True,
+                )
+            prompt_width = encoded["input_ids"].shape[1]
+            for row in output:
+                results.append(self.tokenizer.decode(row[prompt_width:], skip_special_tokens=True).strip())
+            del output, encoded
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+        return results
+
 
 class MockLLM:
     """Fast deterministic backend for wiring tests; real experiments use LocalHFLLM."""
@@ -109,6 +150,10 @@ class MockLLM:
         )
         user_prompt = "\n".join(str(message.get("content", "")) for message in messages)
         return self.generate(system_prompt, user_prompt, seed=seed)
+
+    def generate_messages_batch(self, batch_messages, *, micro_batch_size=32, seed=None):
+        return [self.generate_messages(messages, seed=(seed + i if seed is not None else None))
+                for i, messages in enumerate(batch_messages)]
 
 
 def build_llm(backend: str, model_path: Path, max_new_tokens: int, temperature: float, device: str):

@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from typing import Callable, Hashable, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from enum import Enum
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,63 @@ class PairedEstimate:
     @property
     def total_stepwise(self) -> float:
         return sum(self.orchestration) + sum(self.agent_execution)
+
+
+class BranchType(str, Enum):
+    C = "c"
+    R = "r"
+    Z = "z"
+
+
+@dataclass(frozen=True)
+class BranchRequest:
+    trajectory_index: int
+    step: int
+    branch_type: BranchType
+    context: object
+    action: Hashable | None
+    output: object | None
+
+
+def build_branch_requests(trajectories: Sequence[Trajectory], horizon: int) -> list[BranchRequest]:
+    requests = []
+    for trajectory_index, trajectory in enumerate(trajectories):
+        for step in range(horizon):
+            requests.extend([
+                BranchRequest(trajectory_index, step, BranchType.C, trajectory.contexts[step], None, None),
+                BranchRequest(trajectory_index, step, BranchType.R, trajectory.contexts[step], trajectory.actions[step], None),
+                BranchRequest(trajectory_index, step, BranchType.Z, trajectory.contexts[step], trajectory.actions[step], trajectory.outputs[step]),
+            ])
+    return requests
+
+
+def execute_branch_requests(
+    requests: Sequence[BranchRequest],
+    continue_fn: Callable[[BranchRequest], object],
+    *,
+    batch_fn: Callable[[Sequence[BranchRequest]], Sequence[object]] | None = None,
+    micro_batch_size: int = 1,
+) -> list[object]:
+    """Execute branch requests in stable order with bounded micro-batches.
+
+    ``batch_fn`` is intentionally injected: a real runner can provide a
+    single-model batched generation implementation, while tests and legacy
+    callers use ``continue_fn``.  No background threads are used here, so CUDA
+    model state and paired request ordering remain deterministic.
+    """
+    if micro_batch_size < 1:
+        raise ValueError("micro_batch_size must be positive")
+    requests = list(requests)
+    if batch_fn is None or micro_batch_size == 1:
+        return [continue_fn(request) for request in requests]
+    values: list[object] = []
+    for start in range(0, len(requests), micro_batch_size):
+        chunk = requests[start:start + micro_batch_size]
+        result = list(batch_fn(chunk))
+        if len(result) != len(chunk):
+            raise ValueError("batch_fn must return one value per request")
+        values.extend(result)
+    return values
 
 
 def same_cluster(

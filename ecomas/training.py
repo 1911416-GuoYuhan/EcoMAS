@@ -104,23 +104,26 @@ def run_training(
 def run_calibration_training(
     runner: MASRunner, samples: list[BenchmarkSample], result_path: Path, checkpoint_path: Path,
     *, epochs: int = 1, lr: float = 1e-3, calibration_samples: int = 4, seed: int = 0, mixed: bool = False,
+    target_samples: list[BenchmarkSample] | None = None,
 ) -> list[RunRecord]:
     """Train with the paper's stepwise paired C/R suffix estimator."""
     if calibration_samples < 2:
         raise ValueError("calibration_samples must be at least 2")
-    space = build_semantic_space(runner.task_name, samples=samples)
-    target = torch.tensor([gold_distribution(runner.task_name, s, space) for s in samples], device=runner.router.device).mean(0)
+    target_support = target_samples or samples
+    space = build_semantic_space(runner.task_name, samples=target_support)
+    target = torch.tensor([gold_distribution(runner.task_name, s, space) for s in target_support], device=runner.router.device).mean(0)
     optimizer = AdamW(runner.router.model.parameters(), lr=lr)
+    from ecomas.batched_runner import BatchedMASRunner
+    batched_runner = BatchedMASRunner(runner, micro_batch_size=min(4, calibration_samples))
     records: list[RunRecord] = []
     runner.router.model.train()
     for epoch in range(epochs):
         for sample_index, sample in enumerate(tqdm(samples, desc=f"train:{runner.task_name}:epoch{epoch + 1}")):
             optimizer.zero_grad(set_to_none=True)
-            # Transformers generation on one shared CUDA model is not thread
-            # safe; keep real-Qwen execution serial unless separate model
-            # replicas are provisioned.
-            sampler = runner_paired_sampler(runner, sample, route_mode="sample", seed=seed + epoch * 100000 + sample_index * calibration_samples, parallel_workers=1)
-            estimate = sampler.estimate(calibration_samples)
+            estimate = batched_runner.paired_estimate(
+                sample, calibration_samples,
+                seed + epoch * 100000 + sample_index * calibration_samples,
+            )
             main = torch.stack([_feature_tensor(runner.task_name, x, space, runner.router.device) for x in estimate.main_outputs])
             branches = torch.stack([torch.stack([torch.stack([_feature_tensor(runner.task_name, item[k], space, runner.router.device) for k in ("c", "r", "z")]) for item in row]) for row in estimate.branch_outputs])
             logs = torch.stack([torch.stack(list(row)) for row in estimate.route_log_probs])
@@ -134,6 +137,9 @@ def run_calibration_training(
             loss.backward()
             optimizer.step()
             records.extend([record for record in (estimate.records or []) if record is not None])
+            runner.branch_cache.clear()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
     runner.router.save(checkpoint_path)
     write_jsonl(result_path, records)
     return records

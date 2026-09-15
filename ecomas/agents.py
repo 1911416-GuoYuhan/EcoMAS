@@ -60,6 +60,16 @@ class SpecialistAgent:
         generation_seed: int | None = None,
         is_final_step: bool = False,
     ) -> AgentOutput:
+        response_messages = self.prepare_messages(task_text, previous_results, task_name, is_final_step)
+        try:
+            raw_text = self.llm.generate_messages(response_messages, seed=generation_seed)
+        except TypeError:
+            raw_text = self.llm.generate_messages(response_messages)
+        return self.consume_response(raw_text, task_name)
+
+    def prepare_messages(self, task_text: str, previous_results: list[str], task_name: str,
+                         is_final_step: bool = False) -> list[dict[str, str]]:
+        """Prepare one generation request without running the shared LLM."""
         if not self.dialog_history:
             self.dialog_history = [
                 {"role": "system", "content": self._system_prompt(task_text, task_name)}
@@ -107,11 +117,10 @@ class SpecialistAgent:
         user_message = {"role": "user", "content": user_prompt}
         if self.dialog_history[-1] != user_message:
             self.dialog_history.append(user_message)
-        response_messages = [deepcopy(self.dialog_history[0]), deepcopy(user_message)]
-        try:
-            raw_text = self.llm.generate_messages(response_messages, seed=generation_seed)
-        except TypeError:
-            raw_text = self.llm.generate_messages(response_messages)
+        return [deepcopy(self.dialog_history[0]), deepcopy(user_message)]
+
+    def consume_response(self, raw_text: str, task_name: str) -> AgentOutput:
+        """Update private history and parse a previously generated response."""
         self.dialog_history.append({"role": "assistant", "content": str(raw_text)})
         analysis, candidate = parse_agent_response(raw_text, task_name)
         task_key = _task_key(task_name)

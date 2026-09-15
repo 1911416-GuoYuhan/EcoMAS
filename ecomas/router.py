@@ -6,6 +6,7 @@ from pathlib import Path
 import torch
 from torch import nn
 from abc import ABC, abstractmethod
+from typing import Sequence
 
 
 class RouterMLP(nn.Module):
@@ -69,6 +70,16 @@ class ArgmaxRouter(RouterPolicy):
             probabilities=[float(x) for x in probs.squeeze(0).detach().cpu().tolist()],
             log_prob=torch.log(probs.squeeze(0)[idx].clamp_min(1e-8)),
         )
+
+    def decide_batch(self, encoded_states: torch.Tensor, mode: str = "argmax",
+                     seeds: Sequence[int | None] | None = None) -> list[RouterDecision]:
+        if encoded_states.ndim != 2:
+            raise ValueError("encoded_states must have shape [N,D]")
+        if seeds is not None and len(seeds) != encoded_states.shape[0]:
+            raise ValueError("seeds length must match batch size")
+        return [self.decide(encoded_states[i:i + 1], mode=mode,
+                            seed=seeds[i] if seeds is not None else None)
+                for i in range(encoded_states.shape[0])]
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
