@@ -3,7 +3,9 @@
 from math import log
 from dataclasses import dataclass
 from typing import Any, Iterable, Sequence
-import re
+
+from ecomas.evaluation import invalid_answer, is_valid_answer, normalize_answer
+from ecomas.semantic_clustering import _math_symbol
 
 
 def _validate(probabilities: Sequence[Sequence[float]], labels: Sequence[int]) -> None:
@@ -22,6 +24,41 @@ def brier_score(probabilities: Sequence[Sequence[float]], labels: Sequence[int])
 def nll(probabilities: Sequence[Sequence[float]], labels: Sequence[int], eps: float = 1e-12) -> float:
     _validate(probabilities, labels)
     return -sum(log(max(row[label], eps)) for row, label in zip(probabilities, labels)) / len(labels)
+
+
+def distribution_brier_score(
+    probabilities: Sequence[Sequence[float]],
+    targets: Sequence[Sequence[float]],
+) -> float:
+    """Expected multiclass Brier score for possibly soft true labels."""
+    if len(probabilities) != len(targets) or not probabilities:
+        raise ValueError("probabilities and targets must be non-empty and have equal length")
+    _validate(probabilities, [0] * len(probabilities))
+    _validate(targets, [0] * len(targets))
+    if any(len(probability) != len(target) for probability, target in zip(probabilities, targets)):
+        raise ValueError("probabilities and targets must have equal dimensions")
+    return sum(
+        sum(probability * probability - 2.0 * probability * target for probability, target in zip(row, target_row)) + 1.0
+        for row, target_row in zip(probabilities, targets)
+    ) / len(probabilities)
+
+
+def distribution_nll(
+    probabilities: Sequence[Sequence[float]],
+    targets: Sequence[Sequence[float]],
+    eps: float = 1e-12,
+) -> float:
+    """Cross entropy against a true-answer distribution."""
+    if len(probabilities) != len(targets) or not probabilities:
+        raise ValueError("probabilities and targets must be non-empty and have equal length")
+    _validate(probabilities, [0] * len(probabilities))
+    _validate(targets, [0] * len(targets))
+    if any(len(probability) != len(target) for probability, target in zip(probabilities, targets)):
+        raise ValueError("probabilities and targets must have equal dimensions")
+    return -sum(
+        sum(target * log(max(probability, eps)) for probability, target in zip(row, target_row))
+        for row, target_row in zip(probabilities, targets)
+    ) / len(probabilities)
 
 
 def reliability_diagram(probabilities: Sequence[Sequence[float]], labels: Sequence[int], bins: int = 10) -> list[dict[str, float | int]]:
@@ -69,25 +106,17 @@ class SemanticSpace:
         return self.keys.index(key)
 
 
-def _math_key(value: Any) -> str:
-    value = str(value).strip()
-    value = re.sub(r"\\boxed\s*\{(.*)\}", r"\1", value)
-    value = value.replace("\\left", "").replace("\\right", "")
-    value = re.sub(r"\s+", " ", value)
-    return f"math500::{value}"
-
-
 def semantic_key(task_name: str, answer: Any) -> str:
     """Map an answer to the fixed symbolic space for its task."""
     text = str(answer).strip()
+    if text.startswith("invalid::") or not is_valid_answer(task_name, text):
+        return invalid_answer(task_name)
     if task_name == "mmlu_pro":
-        match = re.search(r"\\b([A-J])\\b", text.upper())
-        return f"mmlu_pro::{match.group(1) if match else text.upper()}"
+        return f"mmlu_pro::{normalize_answer(task_name, text)}"
     if task_name == "chaosnli":
-        from ecomas.datasets import normalize_chaos_label
-        return f"chaosnli::{normalize_chaos_label(text)}"
+        return f"chaosnli::{normalize_answer(task_name, text)}"
     if task_name == "math500":
-        return _math_key(text)
+        return _math_symbol(text)[1]
     return f"{task_name}::{text}"
 
 
@@ -99,9 +128,9 @@ def build_semantic_space(task_name: str, samples: Iterable[Any] = (), answers: I
     canonical keys; callers should build it once from train plus test support.
     """
     if task_name == "mmlu_pro":
-        keys = tuple(f"mmlu_pro::{letter}" for letter in "ABCDEFGHIJ")
+        keys = tuple(f"mmlu_pro::{letter}" for letter in "ABCDEFGHIJ") + (invalid_answer(task_name),)
     elif task_name == "chaosnli":
-        keys = tuple(f"chaosnli::{label}" for label in ("entailment", "neutral", "contradiction"))
+        keys = tuple(f"chaosnli::{label}" for label in ("entailment", "neutral", "contradiction")) + (invalid_answer(task_name),)
     else:
         values = list(answers)
         for sample in samples:
@@ -110,6 +139,7 @@ def build_semantic_space(task_name: str, samples: Iterable[Any] = (), answers: I
         # Math has open vocabulary; reserve a deterministic unknown bucket so
         # predictions outside the collected gold support still contribute.
         observed.add("math500::__other__")
+        observed.add(invalid_answer(task_name))
         keys = tuple(sorted(observed))
     if not keys:
         raise ValueError("semantic space cannot be empty")
@@ -125,8 +155,9 @@ def output_distribution(task_name: str, outputs: Iterable[Any], space: SemanticS
         key = semantic_key(task_name, output)
         if key not in space.keys and task_name == "math500":
             key = "math500::__other__"
-        if key in space.keys:
-            counts[space.index(key)] += 1.0
+        if key not in space.keys:
+            raise ValueError(f"output {key!r} is outside semantic space")
+        counts[space.index(key)] += 1.0
     total = sum(counts)
     if total == 0:
         return [0.0] * space.dimension
@@ -142,11 +173,11 @@ def gold_distribution(task_name: str, sample: Any, space: SemanticSpace) -> list
             values = [float(raw.get(label, raw.get(label[0], 0.0))) for label in labels]
             total = sum(values)
             if total > 0:
-                return [value / total for value in values]
-        if isinstance(raw, (list, tuple)) and len(raw) == space.dimension:
+                return [value / total for value in values] + [0.0]
+        if isinstance(raw, (list, tuple)) and len(raw) == 3:
             total = sum(float(x) for x in raw)
             if total > 0:
-                return [float(x) / total for x in raw]
+                return [float(x) / total for x in raw] + [0.0]
     vector = [0.0] * space.dimension
     key = semantic_key(task_name, getattr(sample, "gold_answer"))
     if key not in space.keys:
@@ -209,7 +240,7 @@ def estimate_paired_calibration_gradient(
     if main_features.ndim != 2 or branch_features.ndim != 4 or route_log_probs.ndim != 2:
         raise ValueError("expected main [B,D], branches [B,T,3,D], log_probs [B,T]")
     bsz, horizon, branch_count, dimension = branch_features.shape
-    if branch_count != 3 or main_features.shape != (bsz, dimension) or route_log_probs.shape != (bsz, horizon) or q_star.numel() != dimension:
+    if bsz < 2 or branch_count != 3 or main_features.shape != (bsz, dimension) or route_log_probs.shape != (bsz, horizon) or q_star.numel() != dimension:
         raise ValueError("inconsistent paired calibration dimensions")
     features = main_features.detach()
     branches = branch_features.detach()
@@ -222,4 +253,4 @@ def estimate_paired_calibration_gradient(
         for step in range(horizon):
             delta = 2.0 * torch.dot(q_loo - target, branches[b, step, 1] - branches[b, step, 0])
             terms.append(delta.detach() * route_log_probs[b, step])
-    return loss, torch.stack(terms).mean()
+    return loss, torch.stack(terms).sum() / bsz

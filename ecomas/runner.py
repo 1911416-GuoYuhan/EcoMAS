@@ -61,6 +61,7 @@ class ContextSnapshot:
     state_messages: list[dict[str, str]]
     previous_results: list[str]
     agent_histories: dict[str, list[dict[str, str]]]
+    final_candidate: str = ""
 
 
 class MASRunner:
@@ -79,9 +80,10 @@ class MASRunner:
         self.branch_cache: dict[tuple, str] = {}
 
     def snapshot(self, sample: BenchmarkSample, step: int, state_messages: list[dict[str, str]],
-                 previous_results: list[str]) -> ContextSnapshot:
+                 previous_results: list[str], final_candidate: str = "") -> ContextSnapshot:
         return ContextSnapshot(sample, step, deepcopy(state_messages), deepcopy(previous_results),
-                               {name: deepcopy(agent.dialog_history) for name, agent in self.agents.items()})
+                               {name: deepcopy(agent.dialog_history) for name, agent in self.agents.items()},
+                               final_candidate)
 
     def continue_from_snapshot(
         self,
@@ -109,6 +111,7 @@ class MASRunner:
             snapshot.state_messages,
             snapshot.previous_results,
             snapshot.agent_histories,
+            snapshot.final_candidate,
         )
         key = (
             snapshot.sample.uid, snapshot.step, forced_agent, forced_output,
@@ -126,7 +129,7 @@ class MASRunner:
             branch_agents[name] = branch_agent
         state_messages = deepcopy(snapshot.state_messages)
         previous_results = deepcopy(snapshot.previous_results)
-        final_candidate = ""
+        final_candidate = snapshot.final_candidate
         for step in range(snapshot.step, int(self.task_config["steps"]) + 1):
             offset = step - snapshot.step
             decision = self.router.decide(
@@ -192,7 +195,9 @@ class MASRunner:
         self.last_route_log_probs: list[torch.Tensor] = []
 
         for step in range(1, int(self.task_config["steps"]) + 1):
-            self.last_snapshots.append(self.snapshot(sample, step, state_messages, previous_results))
+            self.last_snapshots.append(self.snapshot(
+                sample, step, state_messages, previous_results, final_candidate
+            ))
             encoded = self.encoder([state_messages])
             current_route_seed = (route_seed + step - 1) if route_seed is not None else None
             decision = self.router.decide(encoded, mode=route_mode, seed=current_route_seed)

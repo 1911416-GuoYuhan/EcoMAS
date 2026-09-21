@@ -75,8 +75,8 @@ class PairedSampler:
         self.parallel_workers = max(1, int(parallel_workers))
 
     def estimate(self, num_trajectories: int) -> PairedEstimate:
-        if num_trajectories < 1:
-            raise ValueError("num_trajectories must be at least 1")
+        if num_trajectories < 2:
+            raise ValueError("num_trajectories must be at least 2")
         mains = [self.sample_main() for _ in range(num_trajectories)]
         orch = [[] for _ in range(self.horizon)]
         agent = [[] for _ in range(self.horizon)]
@@ -168,7 +168,7 @@ def runner_paired_sampler(
     *,
     route_mode: str = "sample",
     seed: int = 0,
-    parallel_workers: int = 4,
+    parallel_workers: int = 1,
 ) -> PairedSampler:
     """Build a paired estimator backed by a real MASRunner."""
     call_index = 0

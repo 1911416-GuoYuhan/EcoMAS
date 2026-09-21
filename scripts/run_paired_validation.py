@@ -8,7 +8,7 @@ from pathlib import Path
 import torch
 
 from ecomas.agents import SpecialistAgent
-from ecomas.config import PROJECT_ROOT
+from ecomas.config import DEFAULT_ENCODER_MODEL_PATH, PROJECT_ROOT
 from ecomas.datasets import load_samples
 from ecomas.encoder import build_encoder
 from ecomas.llm import build_llm
@@ -17,12 +17,26 @@ from ecomas.registry import TASK_REGISTRY
 from ecomas.router import ArgmaxRouter
 
 
-def build_runner(task: str, model_path: Path, checkpoint: Path, device: str, max_new_tokens: int, temperature: float):
+def build_runner(
+    task: str,
+    model_path: Path,
+    encoder_model_path: Path,
+    checkpoint: Path,
+    device: str,
+    max_new_tokens: int,
+    temperature: float,
+):
     llm = build_llm("local_hf", model_path, max_new_tokens, temperature, device)
     agents = [SpecialistAgent(spec, llm) for spec in TASK_REGISTRY[task]["agents"]]
-    encoder = build_encoder("hf", model_path, device)
+    encoder = build_encoder("hf", encoder_model_path, device)
     router_device = device if device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
-    router = ArgmaxRouter(task, [agent.spec.name for agent in agents], encoder.output_dim, device=router_device)
+    router = ArgmaxRouter(
+        task,
+        [agent.spec.name for agent in agents],
+        encoder.output_dim,
+        device=router_device,
+        encoder_model_path=encoder_model_path,
+    )
     router.load(checkpoint)
     from ecomas.runner import MASRunner
 
@@ -39,22 +53,38 @@ def main() -> None:
         "a09a35458c702b33eeacc393d103063234e8bc28"
     ))
     parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--encoder-model-path", type=Path, default=DEFAULT_ENCODER_MODEL_PATH)
     parser.add_argument("--output-root", type=Path, default=PROJECT_ROOT / "runs" / "paired_validation")
     parser.add_argument("--B", type=int, default=10)
     parser.add_argument("--limit", type=int, default=3)
     parser.add_argument("--max-new-tokens", type=int, default=256)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--device", default="auto")
+    parser.add_argument("--parallel-workers", type=int, default=1)
     args = parser.parse_args()
     split = {"mmlu_pro": "validation", "math500": "test", "chaosnli": "mnli_m"}[args.task]
     samples = load_samples(args.task, args.benchmark_root, split, args.limit)
-    runner = build_runner(args.task, args.model_path, args.checkpoint, args.device, args.max_new_tokens, args.temperature)
+    runner = build_runner(
+        args.task,
+        args.model_path,
+        args.encoder_model_path,
+        args.checkpoint,
+        args.device,
+        args.max_new_tokens,
+        args.temperature,
+    )
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     output_dir = args.output_root / args.task / stamp
     output_dir.mkdir(parents=True, exist_ok=True)
     rows = []
     for sample_index, sample in enumerate(samples):
-        sampler = runner_paired_sampler(runner, sample, route_mode="sample")
+        sampler = runner_paired_sampler(
+            runner,
+            sample,
+            route_mode="sample",
+            seed=sample_index * 1000003,
+            parallel_workers=args.parallel_workers,
+        )
         estimate = sampler.estimate(args.B)
         rows.append({
             "sample_index": sample_index,

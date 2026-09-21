@@ -138,6 +138,12 @@ def _sympy_expression(text: str):
     return sympify(_latex_to_sympy(text), evaluate=True)
 
 
+def _canonical_srepr(text: str) -> str:
+    from sympy import nsimplify, simplify, srepr
+
+    return srepr(simplify(nsimplify(_sympy_expression(text))))
+
+
 def _math_symbol(answer: str) -> tuple[str, str, str]:
     text = normalize_math_text(answer)
     if re.fullmatch(r"[A-Za-z]+(?:[ .'][A-Za-z]+)*", text):
@@ -153,16 +159,13 @@ def _math_symbol(answer: str) -> tuple[str, str, str]:
     else:
         answer_type = "expression"
     try:
-        from sympy import srepr
-
         if answer_type in {"tuple", "set"}:
             body = text[1:-1]
-            values = [srepr(_sympy_expression(part)) for part in _split_top_level(body)]
+            values = [_canonical_srepr(part) for part in _split_top_level(body)]
             if answer_type == "set":
                 values.sort()
             return answer_type, f"math_{answer_type}::{values!r}", "sympy_structured"
-        expression = _sympy_expression(text)
-        return answer_type, f"math::{srepr(expression)}", "sympy"
+        return answer_type, f"math::{_canonical_srepr(text)}", "sympy"
     except Exception:
         # A deterministic lexical key is still a resolved symbol.  It is not
         # silently merged with another unresolved answer.

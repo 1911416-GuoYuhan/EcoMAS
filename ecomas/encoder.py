@@ -8,20 +8,60 @@ import torch
 from torch import nn
 
 
+def prepare_messages_for_template(
+    messages: list[dict[str, Any]],
+    chat_template: str | None,
+) -> list[dict[str, Any]]:
+    """Preserve system context for tokenizers whose template ignores it."""
+    prepared = deepcopy(messages)
+    template = str(chat_template or "")
+    supports_system = any(
+        marker in template
+        for marker in (
+            "message['role'] == 'system'",
+            'message["role"] == "system"',
+            "message.role == 'system'",
+            'message.role == "system"',
+        )
+    )
+    if supports_system:
+        return prepared
+    system_content = "\n\n".join(
+        str(message.get("content", ""))
+        for message in prepared
+        if message.get("role") == "system"
+    ).strip()
+    non_system = [message for message in prepared if message.get("role") != "system"]
+    if not system_content:
+        return non_system
+    prefix = f"System context:\n{system_content}"
+    first_user = next(
+        (message for message in non_system if message.get("role") == "user"),
+        None,
+    )
+    if first_user is None:
+        non_system.insert(0, {"role": "user", "content": prefix})
+    else:
+        first_user["content"] = f"{prefix}\n\n{first_user.get('content', '')}"
+    return non_system
+
+
 class FrozenTextEncoder(nn.Module):
     @property
     def output_dim(self) -> int:
         raise NotImplementedError
 
 
-class PuppeteerStateEncoder(FrozenTextEncoder):
-    """Qwen state encoder compatible with Puppeteer's policy checkpoints."""
+class HFStateEncoder(FrozenTextEncoder):
+    """Frozen Hugging Face model used to embed the current MAS context."""
 
     def __init__(self, model_path: Path, device: str = "auto") -> None:
         super().__init__()
         from transformers import AutoModel, AutoTokenizer
 
         self.tokenizer = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
+        if self.tokenizer.pad_token_id is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
         device_map = "auto" if device == "auto" and torch.cuda.is_available() else None
         self.model = AutoModel.from_pretrained(
             str(model_path),
@@ -53,6 +93,9 @@ class PuppeteerStateEncoder(FrozenTextEncoder):
 
     def _encode_messages(self, messages: list[dict[str, Any]]):
         messages = self.truncate(messages)
+        messages = prepare_messages_for_template(
+            messages, getattr(self.tokenizer, "chat_template", None)
+        )
         return self.tokenizer.apply_chat_template(
             messages,
             tokenize=True,
@@ -93,7 +136,10 @@ class PuppeteerStateEncoder(FrozenTextEncoder):
 def build_encoder(backend: str, model_path: Path, device: str) -> FrozenTextEncoder:
     if backend != "hf":
         raise ValueError(
-            "EcoMAS now requires the Puppeteer-compatible Hugging Face state encoder; "
+            "EcoMAS requires a Hugging Face state encoder; "
             f"unsupported backend: {backend}"
         )
-    return PuppeteerStateEncoder(model_path, device)
+    return HFStateEncoder(model_path, device)
+
+
+PuppeteerStateEncoder = HFStateEncoder

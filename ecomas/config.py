@@ -11,6 +11,9 @@ DEFAULT_QWEN_PATH = Path(
     "models--Qwen--Qwen2.5-7B-Instruct/snapshots/"
     "a09a35458c702b33eeacc393d103063234e8bc28"
 )
+DEFAULT_ENCODER_MODEL_PATH = Path(
+    "/home_bak/guoyuhan/models/Llama-3.1-Nemotron-70B-Reward-HF"
+)
 
 
 @dataclass(frozen=True)
@@ -20,7 +23,7 @@ class RuntimeConfig:
     checkpoint_root: Path = PROJECT_ROOT / "checkpoints"
     llm_backend: str = "local_hf"
     llm_model_path: Path = DEFAULT_QWEN_PATH
-    encoder_model_path: Path | None = None
+    encoder_model_path: Path = DEFAULT_ENCODER_MODEL_PATH
     max_new_tokens: int = 768
     temperature: float = 0.0
     encoder_backend: str = "hf"

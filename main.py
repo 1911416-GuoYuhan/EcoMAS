@@ -9,13 +9,13 @@ from pathlib import Path
 import torch
 
 from ecomas.agents import SpecialistAgent
-from ecomas.config import PROJECT_ROOT, RuntimeConfig
+from ecomas.config import DEFAULT_ENCODER_MODEL_PATH, DEFAULT_QWEN_PATH, PROJECT_ROOT, RuntimeConfig
 from ecomas.datasets import load_samples
 from ecomas.encoder import build_encoder
 from ecomas.llm import build_llm
 from ecomas.registry import TASK_REGISTRY
 from ecomas.router import ArgmaxRouter
-from ecomas.training import run_inference, run_training
+from ecomas.training import run_explanation, run_inference, run_training
 
 
 def build_runtime(args: argparse.Namespace) -> RuntimeConfig:
@@ -25,7 +25,7 @@ def build_runtime(args: argparse.Namespace) -> RuntimeConfig:
         checkpoint_root=Path(args.checkpoint_root),
         llm_backend=args.llm_backend,
         llm_model_path=Path(args.llm_model_path),
-        encoder_model_path=Path(args.encoder_model_path) if args.encoder_model_path else None,
+        encoder_model_path=Path(args.encoder_model_path),
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
         encoder_backend=args.encoder_backend,
@@ -45,12 +45,18 @@ def build_runner(task_name: str, runtime: RuntimeConfig, checkpoint: Path | None
     agents = [SpecialistAgent(spec, llm) for spec in task_cfg["agents"]]
     encoder = build_encoder(
         runtime.encoder_backend,
-        runtime.encoder_model_path or runtime.llm_model_path,
+        runtime.encoder_model_path,
         runtime.device,
     )
     agent_names = [agent.spec.name for agent in agents]
     router_device = runtime.device if runtime.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
-    router = ArgmaxRouter(task_name, agent_names, encoder.output_dim, device=router_device)
+    router = ArgmaxRouter(
+        task_name,
+        agent_names,
+        encoder.output_dim,
+        device=router_device,
+        encoder_model_path=runtime.encoder_model_path,
+    )
     if load_checkpoint and checkpoint and checkpoint.exists():
         router.load(checkpoint)
     return agents, encoder, router
@@ -101,13 +107,9 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--llm-backend", choices=["local_hf", "mock"], default="local_hf")
     parser.add_argument(
         "--llm-model-path",
-        default=(
-            "/data2/guoyuhan/qwen_semantic_clustering_feasibility/.hf_cache/"
-            "models--Qwen--Qwen2.5-7B-Instruct/snapshots/"
-            "a09a35458c702b33eeacc393d103063234e8bc28"
-        ),
+        default=str(DEFAULT_QWEN_PATH),
     )
-    parser.add_argument("--encoder-model-path", default=None)
+    parser.add_argument("--encoder-model-path", default=str(DEFAULT_ENCODER_MODEL_PATH))
     parser.add_argument("--max-new-tokens", type=int, default=768)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--encoder-backend", choices=["hf"], default="hf")
@@ -148,6 +150,15 @@ def main() -> None:
     run_parser.add_argument("--num-samples", type=int, default=1)
     run_parser.add_argument("--seed", type=int, default=0)
 
+    explain_parser = subparsers.add_parser("explain")
+    add_common_args(explain_parser)
+    explain_parser.add_argument("--checkpoint", default=None)
+    explain_parser.add_argument("--require-checkpoint", action="store_true")
+    explain_parser.add_argument("--sampling-budget", type=int, default=10)
+    explain_parser.add_argument("--seed", type=int, default=0)
+    explain_parser.add_argument("--parallel-workers", type=int, default=1)
+    explain_parser.set_defaults(temperature=0.7)
+
     train_parser = subparsers.add_parser("train")
     add_common_args(train_parser)
     train_parser.add_argument("--epochs", type=int, default=1)
@@ -157,6 +168,7 @@ def main() -> None:
     train_parser.add_argument("--seed", type=int, default=0)
     train_parser.add_argument("--test-split", default="test")
     train_parser.add_argument("--test-limit", type=int, default=None)
+    train_parser.set_defaults(temperature=0.7)
 
     args = parser.parse_args()
     if args.command == "list-tasks":
@@ -175,6 +187,8 @@ def main() -> None:
         args.split = default_split(args.task)
     if args.command == "run" and args.num_samples < 1:
         raise ValueError("--num-samples must be at least 1")
+    if args.command == "explain" and args.sampling_budget < 2:
+        raise ValueError("--sampling-budget must be at least 2")
     runtime = build_runtime(args)
     stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     mode = args.command
@@ -186,7 +200,7 @@ def main() -> None:
         checkpoint_path = Path(args.checkpoint) if getattr(args, "checkpoint", None) else default_checkpoint(args.task, runtime.checkpoint_root)
         init_checkpoint = checkpoint_path
     samples = load_samples(args.task, runtime.benchmark_root, args.split, args.limit)
-    if args.command == "run" and args.require_checkpoint and not checkpoint_path.exists():
+    if args.command in {"run", "explain"} and args.require_checkpoint and not checkpoint_path.exists():
         raise FileNotFoundError(f"Router checkpoint not found: {checkpoint_path}")
 
     agents, encoder, router = build_runner(
@@ -204,6 +218,17 @@ def main() -> None:
     if args.command == "run":
         records = run_inference(runner, samples, result_path, route_mode=args.router_mode,
                                 num_samples=args.num_samples, seed=args.seed)
+    elif args.command == "explain":
+        explanation_path = run_dir / "explanation.json"
+        records = run_explanation(
+            runner,
+            samples,
+            result_path,
+            explanation_path,
+            sampling_budget=args.sampling_budget,
+            seed=args.seed,
+            parallel_workers=args.parallel_workers,
+        )
     else:
         pre_calibration_state = deepcopy(router.model.state_dict())
         records = run_training(
@@ -220,9 +245,9 @@ def main() -> None:
         if args.loss in {"calibration", "mixed"}:
             from ecomas.training import evaluate_calibration
             test_samples = load_samples(args.task, runtime.benchmark_root, args.test_split, args.test_limit or args.limit)
-            post_metrics = evaluate_calibration(router, test_samples, num_samples=max(2, args.calibration_samples), seed=args.seed)
+            post_metrics = evaluate_calibration(runner, test_samples, num_samples=max(2, args.calibration_samples), seed=args.seed)
             router.model.load_state_dict(pre_calibration_state)
-            pre_metrics = evaluate_calibration(router, test_samples, num_samples=max(2, args.calibration_samples), seed=args.seed)
+            pre_metrics = evaluate_calibration(runner, test_samples, num_samples=max(2, args.calibration_samples), seed=args.seed)
             router.load(checkpoint_path)
             calibration_report = {
                 "task": args.task,
@@ -248,6 +273,8 @@ def main() -> None:
     )
     if calibration_report_path is not None:
         summary["calibration_report_path"] = str(calibration_report_path)
+    if args.command == "explain":
+        summary["explanation_path"] = str(explanation_path)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
 

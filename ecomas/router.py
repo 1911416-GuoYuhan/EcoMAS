@@ -44,10 +44,18 @@ class RouterPolicy(ABC):
 
 
 class ArgmaxRouter(RouterPolicy):
-    def __init__(self, task_name: str, agent_names: list[str], input_dim: int, device: str = "cpu") -> None:
+    def __init__(
+        self,
+        task_name: str,
+        agent_names: list[str],
+        input_dim: int,
+        device: str = "cpu",
+        encoder_model_path: Path | None = None,
+    ) -> None:
         self.task_name = task_name
         self.agent_names = agent_names
         self.device = torch.device(device)
+        self.encoder_model_path = Path(encoder_model_path) if encoder_model_path else None
         self.model = RouterMLP(input_dim, len(agent_names)).to(self.device)
 
     def decide(self, encoded_state: torch.Tensor, mode: str = "argmax", seed: int | None = None) -> RouterDecision:
@@ -80,7 +88,9 @@ class ArgmaxRouter(RouterPolicy):
                 "metadata": {
                     "task_name": self.task_name,
                     "agent_names": self.agent_names,
-                    "format": "puppeteer_mlp_v1",
+                    "format": "ecomas_router_mlp_v2",
+                    "encoder_model_path": str(self.encoder_model_path) if self.encoder_model_path else None,
+                    "encoder_output_dim": self.model.fc1.in_features,
                 },
             },
             path,
