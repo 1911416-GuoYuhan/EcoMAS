@@ -1,9 +1,8 @@
-"""Calibration metrics and reliability-curve data for multiclass outputs."""
-
 from math import log
 from dataclasses import dataclass
 from typing import Any, Iterable, Sequence
 
+from ecomas.config import METRIC_CONFIG
 from ecomas.evaluation import invalid_answer, is_valid_answer, normalize_answer
 from ecomas.semantic_clustering import _math_symbol
 
@@ -12,7 +11,7 @@ def _validate(probabilities: Sequence[Sequence[float]], labels: Sequence[int]) -
     if len(probabilities) != len(labels) or not probabilities:
         raise ValueError("probabilities and labels must be non-empty and have equal length")
     for row in probabilities:
-        if any(p < 0 for p in row) or abs(sum(row) - 1.0) > 1e-6:
+        if any(p < 0 for p in row) or abs(sum(row) - 1.0) > METRIC_CONFIG["distribution_tolerance"]:
             raise ValueError("each probability row must be a distribution")
 
 
@@ -21,7 +20,7 @@ def brier_score(probabilities: Sequence[Sequence[float]], labels: Sequence[int])
     return sum(sum((p - (i == label)) ** 2 for i, p in enumerate(row)) for row, label in zip(probabilities, labels)) / len(labels)
 
 
-def nll(probabilities: Sequence[Sequence[float]], labels: Sequence[int], eps: float = 1e-12) -> float:
+def nll(probabilities: Sequence[Sequence[float]], labels: Sequence[int], eps: float = METRIC_CONFIG["probability_epsilon"]) -> float:
     _validate(probabilities, labels)
     return -sum(log(max(row[label], eps)) for row, label in zip(probabilities, labels)) / len(labels)
 
@@ -30,7 +29,6 @@ def distribution_brier_score(
     probabilities: Sequence[Sequence[float]],
     targets: Sequence[Sequence[float]],
 ) -> float:
-    """Expected multiclass Brier score for possibly soft true labels."""
     if len(probabilities) != len(targets) or not probabilities:
         raise ValueError("probabilities and targets must be non-empty and have equal length")
     _validate(probabilities, [0] * len(probabilities))
@@ -46,9 +44,8 @@ def distribution_brier_score(
 def distribution_nll(
     probabilities: Sequence[Sequence[float]],
     targets: Sequence[Sequence[float]],
-    eps: float = 1e-12,
+    eps: float = METRIC_CONFIG["probability_epsilon"],
 ) -> float:
-    """Cross entropy against a true-answer distribution."""
     if len(probabilities) != len(targets) or not probabilities:
         raise ValueError("probabilities and targets must be non-empty and have equal length")
     _validate(probabilities, [0] * len(probabilities))
@@ -61,7 +58,7 @@ def distribution_nll(
     ) / len(probabilities)
 
 
-def reliability_diagram(probabilities: Sequence[Sequence[float]], labels: Sequence[int], bins: int = 10) -> list[dict[str, float | int]]:
+def reliability_diagram(probabilities: Sequence[Sequence[float]], labels: Sequence[int], bins: int = METRIC_CONFIG["reliability_bins"]) -> list[dict[str, float | int]]:
     _validate(probabilities, labels)
     if bins < 1:
         raise ValueError("bins must be positive")
@@ -80,7 +77,7 @@ def reliability_diagram(probabilities: Sequence[Sequence[float]], labels: Sequen
     return result
 
 
-def ece(probabilities: Sequence[Sequence[float]], labels: Sequence[int], bins: int = 10) -> float:
+def ece(probabilities: Sequence[Sequence[float]], labels: Sequence[int], bins: int = METRIC_CONFIG["reliability_bins"]) -> float:
     diagram = reliability_diagram(probabilities, labels, bins)
     total = len(labels)
     return sum((entry["count"] / total) * abs(entry["accuracy"] - entry["confidence"]) for entry in diagram)
@@ -88,13 +85,6 @@ def ece(probabilities: Sequence[Sequence[float]], labels: Sequence[int], bins: i
 
 @dataclass(frozen=True)
 class SemanticSpace:
-    """A fixed, task-level feature space used by calibration.
-
-    The keys are deliberately independent of question-local cluster IDs.  A
-    prediction is represented by a one-hot feature (or a normalized empirical
-    distribution), so the same coordinates can be compared on train and test.
-    """
-
     task_name: str
     keys: tuple[str, ...]
 
@@ -107,7 +97,6 @@ class SemanticSpace:
 
 
 def semantic_key(task_name: str, answer: Any) -> str:
-    """Map an answer to the fixed symbolic space for its task."""
     text = str(answer).strip()
     if text.startswith("invalid::") or not is_valid_answer(task_name, text):
         return invalid_answer(task_name)
@@ -121,12 +110,6 @@ def semantic_key(task_name: str, answer: Any) -> str:
 
 
 def build_semantic_space(task_name: str, samples: Iterable[Any] = (), answers: Iterable[Any] = ()) -> SemanticSpace:
-    """Construct a deterministic task-level space (方案 A).
-
-    MMLU and ChaosNLI use their complete closed label sets.  Math is open
-    vocabulary, therefore the space is the sorted union of observed train/gold
-    canonical keys; callers should build it once from train plus test support.
-    """
     if task_name == "mmlu_pro":
         keys = tuple(f"mmlu_pro::{letter}" for letter in "ABCDEFGHIJ") + (invalid_answer(task_name),)
     elif task_name == "chaosnli":
@@ -136,8 +119,6 @@ def build_semantic_space(task_name: str, samples: Iterable[Any] = (), answers: I
         for sample in samples:
             values.extend([getattr(sample, "gold_answer", "")])
         observed = {semantic_key(task_name, value) for value in values if str(value).strip()}
-        # Math has open vocabulary; reserve a deterministic unknown bucket so
-        # predictions outside the collected gold support still contribute.
         observed.add("math500::__other__")
         observed.add(invalid_answer(task_name))
         keys = tuple(sorted(observed))
@@ -165,7 +146,6 @@ def output_distribution(task_name: str, outputs: Iterable[Any], space: SemanticS
 
 
 def gold_distribution(task_name: str, sample: Any, space: SemanticSpace) -> list[float]:
-    """Return q*; ChaosNLI uses its human label distribution when available."""
     if task_name == "chaosnli":
         raw = getattr(sample, "metadata", {}).get("label_dist")
         if isinstance(raw, dict):
@@ -197,13 +177,6 @@ def estimate_calibration_gradient(
     route_log_probs: "torch.Tensor",
     q_star: "torch.Tensor",
 ) -> tuple["torch.Tensor", "torch.Tensor"]:
-    """Leave-one-out paired/REINFORCE estimator for the calibration objective.
-
-    ``output_features`` has shape ``[B, D]`` and ``route_log_probs`` is
-    ``[B, T]``.  Features and q estimates are detached; only route log-probs
-    carry gradients.  The returned loss is the empirical squared MMD objective
-    and the scalar surrogate can be backpropagated through the router.
-    """
     import torch
     if output_features.ndim != 2 or route_log_probs.ndim != 2:
         raise ValueError("features must be [B,D] and route_log_probs [B,T]")
@@ -229,13 +202,6 @@ def estimate_paired_calibration_gradient(
     route_log_probs: "torch.Tensor",
     q_star: "torch.Tensor",
 ) -> tuple["torch.Tensor", "torch.Tensor"]:
-    """Paper-aligned stepwise C/R calibration estimator.
-
-    ``main_features`` is ``[B,D]``; ``branch_features`` is ``[B,T,3,D]`` in
-    C/R/Z order; and ``route_log_probs`` is ``[B,T]``.  Z is retained for
-    diagnostics, while the calibration gradient uses the required R-minus-C
-    suffix feature difference at every decision step.
-    """
     import torch
     if main_features.ndim != 2 or branch_features.ndim != 4 or route_log_probs.ndim != 2:
         raise ValueError("expected main [B,D], branches [B,T,3,D], log_probs [B,T]")

@@ -7,6 +7,7 @@ import torch
 from torch.optim import AdamW
 from tqdm import tqdm
 
+from ecomas.config import ARTIFACT_CONFIG, COMMAND_CONFIG, RUNTIME_CONFIG, SAMPLING_CONFIG
 from ecomas.datasets import BenchmarkSample
 from ecomas.runner import MASRunner, RunRecord, write_jsonl
 from ecomas.calibration import build_semantic_space, estimate_paired_calibration_gradient, gold_distribution, semantic_key, output_distribution
@@ -26,7 +27,9 @@ LOSS_REGISTRY = {
 
 
 def run_inference(runner: MASRunner, samples: list[BenchmarkSample], result_path: Path,
-                  route_mode: str = "argmax", num_samples: int = 1, seed: int = 0) -> list[RunRecord]:
+                  route_mode: str = COMMAND_CONFIG["run"]["router_mode"],
+                  num_samples: int = COMMAND_CONFIG["run"]["num_samples"],
+                  seed: int = SAMPLING_CONFIG["default_seed"]) -> list[RunRecord]:
     records: list[RunRecord] = []
     for sample in tqdm(samples, desc=f"infer:{runner.task_name}"):
         for sample_index in range(num_samples):
@@ -54,7 +57,7 @@ def run_inference(runner: MASRunner, samples: list[BenchmarkSample], result_path
         )
         for uid, answers in sorted(by_uid.items())
     }
-    result_path.with_name("semantic_clusters.json").write_text(
+    result_path.with_name(ARTIFACT_CONFIG["semantic_clusters"]).write_text(
         json.dumps(semantic_reports, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     if num_samples > 1:
@@ -69,7 +72,7 @@ def run_inference(runner: MASRunner, samples: list[BenchmarkSample], result_path
             }
             for uid, report in semantic_reports.items()
         }
-        result_path.with_name("uncertainty.json").write_text(
+        result_path.with_name(ARTIFACT_CONFIG["uncertainty"]).write_text(
             json.dumps(uncertainty_reports, ensure_ascii=False, indent=2), encoding="utf-8"
         )
     return records
@@ -81,11 +84,10 @@ def run_explanation(
     result_path: Path,
     report_path: Path,
     *,
-    sampling_budget: int = 10,
-    seed: int = 0,
-    parallel_workers: int = 1,
+    sampling_budget: int = COMMAND_CONFIG["explain"]["sampling_budget"],
+    seed: int = SAMPLING_CONFIG["default_seed"],
+    parallel_workers: int = SAMPLING_CONFIG["parallel_workers"],
 ) -> list[RunRecord]:
-    """Run the paper's paired C/R/Z estimator and persist auditable samples."""
     if sampling_budget < 2:
         raise ValueError("sampling_budget must be at least 2")
     reports = []
@@ -94,8 +96,8 @@ def run_explanation(
         sampler = runner_paired_sampler(
             runner,
             sample,
-            route_mode="sample",
-            seed=seed + sample_index * 1000003,
+            route_mode=RUNTIME_CONFIG["router_modes"][1],
+            seed=seed + sample_index * SAMPLING_CONFIG["sample_seed_stride"],
             parallel_workers=parallel_workers,
         )
         estimate = sampler.estimate(sampling_budget)
@@ -137,15 +139,15 @@ def run_training(
     samples: list[BenchmarkSample],
     result_path: Path,
     checkpoint_path: Path,
-    epochs: int = 1,
-    lr: float = 1e-3,
-    loss_name: str = "accuracy",
-    calibration_samples: int = 4,
-    seed: int = 0,
+    epochs: int = COMMAND_CONFIG["train"]["epochs"],
+    lr: float = COMMAND_CONFIG["train"]["learning_rate"],
+    loss_name: str = COMMAND_CONFIG["train"]["loss"],
+    calibration_samples: int = COMMAND_CONFIG["train"]["calibration_samples"],
+    seed: int = SAMPLING_CONFIG["default_seed"],
 ) -> list[RunRecord]:
     if loss_name not in {*LOSS_REGISTRY, "calibration", "mixed"}:
         raise ValueError(f"Unknown loss function: {loss_name}")
-    optimizer = AdamW(runner.router.model.parameters(), lr=lr, weight_decay=0.0)
+    optimizer = AdamW(runner.router.model.parameters(), lr=lr, weight_decay=COMMAND_CONFIG["train"]["weight_decay"])
     all_records: list[RunRecord] = []
     loss_fn = LOSS_REGISTRY.get(loss_name)
 
@@ -172,22 +174,27 @@ def run_training(
 
 def run_calibration_training(
     runner: MASRunner, samples: list[BenchmarkSample], result_path: Path, checkpoint_path: Path,
-    *, epochs: int = 1, lr: float = 1e-3, calibration_samples: int = 4, seed: int = 0, mixed: bool = False,
+    *, epochs: int = COMMAND_CONFIG["train"]["epochs"],
+    lr: float = COMMAND_CONFIG["train"]["learning_rate"],
+    calibration_samples: int = COMMAND_CONFIG["train"]["calibration_samples"],
+    seed: int = SAMPLING_CONFIG["default_seed"], mixed: bool = False,
 ) -> list[RunRecord]:
-    """Train with the paper's stepwise paired C/R suffix estimator."""
     if calibration_samples < 2:
         raise ValueError("calibration_samples must be at least 2")
     space = build_semantic_space(runner.task_name, samples=samples)
-    optimizer = AdamW(runner.router.model.parameters(), lr=lr, weight_decay=0.0)
+    optimizer = AdamW(runner.router.model.parameters(), lr=lr, weight_decay=COMMAND_CONFIG["train"]["weight_decay"])
     records: list[RunRecord] = []
     runner.router.model.train()
     for epoch in range(epochs):
         for sample_index, sample in enumerate(tqdm(samples, desc=f"train:{runner.task_name}:epoch{epoch + 1}")):
             optimizer.zero_grad(set_to_none=True)
-            # Transformers generation on one shared CUDA model is not thread
-            # safe; keep real-Qwen execution serial unless separate model
-            # replicas are provisioned.
-            sampler = runner_paired_sampler(runner, sample, route_mode="sample", seed=seed + epoch * 100000 + sample_index * calibration_samples, parallel_workers=1)
+            sampler = runner_paired_sampler(
+                runner,
+                sample,
+                route_mode=RUNTIME_CONFIG["router_modes"][1],
+                seed=seed + epoch * SAMPLING_CONFIG["epoch_seed_stride"] + sample_index * calibration_samples,
+                parallel_workers=SAMPLING_CONFIG["parallel_workers"],
+            )
             estimate = sampler.estimate(calibration_samples)
             main = torch.stack([_feature_tensor(runner.task_name, x, space, runner.router.device) for x in estimate.main_outputs])
             branches = torch.stack([torch.stack([torch.stack([_feature_tensor(runner.task_name, item[k], space, runner.router.device) for k in ("c", "r", "z")]) for item in row]) for row in estimate.branch_outputs])
@@ -203,7 +210,7 @@ def run_calibration_training(
                     -float(getattr(record, "correct", False)) * logs[i].sum()
                     for i, record in enumerate(estimate.records or [])
                 ]).mean()
-                loss = loss + 0.1 * accuracy_term
+                loss = loss + COMMAND_CONFIG["train"]["mixed_accuracy_weight"] * accuracy_term
             loss.backward()
             optimizer.step()
             records.extend([record for record in (estimate.records or []) if record is not None])
@@ -229,13 +236,12 @@ def run_trajectory_calibration_training(
     result_path: Path,
     checkpoint_path: Path,
     *,
-    epochs: int = 1,
-    lr: float = 1e-3,
-    calibration_samples: int = 4,
-    seed: int = 0,
+    epochs: int = COMMAND_CONFIG["train"]["epochs"],
+    lr: float = COMMAND_CONFIG["train"]["learning_rate"],
+    calibration_samples: int = COMMAND_CONFIG["train"]["calibration_samples"],
+    seed: int = SAMPLING_CONFIG["default_seed"],
     mixed: bool = False,
 ) -> list[RunRecord]:
-    """Compatibility entry point for the paper-aligned paired trainer."""
     return run_calibration_training(
         runner,
         samples,
@@ -253,16 +259,10 @@ def evaluate_calibration(
     runner: MASRunner,
     samples: list[BenchmarkSample],
     *,
-    num_samples: int = 4,
-    route_mode: str = "sample",
-    seed: int = 0,
+    num_samples: int = COMMAND_CONFIG["train"]["calibration_samples"],
+    route_mode: str = RUNTIME_CONFIG["router_modes"][1],
+    seed: int = SAMPLING_CONFIG["default_seed"],
 ) -> dict[str, object]:
-    """Evaluate fixed-space predictive distributions without updating weights.
-
-    The returned primary metrics are accuracy and squared semantic calibration
-    error.  ECE/Brier/NLL use the same task-level coordinates and are secondary
-    diagnostics; they are not substituted for the paper's MMD objective.
-    """
     if num_samples < 1:
         raise ValueError("num_samples must be positive")
     space = build_semantic_space(runner.task_name, samples=samples)
@@ -309,10 +309,9 @@ def compare_calibration(
     after_runner: MASRunner,
     test_samples: list[BenchmarkSample],
     *,
-    num_samples: int = 4,
-    seed: int = 0,
+    num_samples: int = COMMAND_CONFIG["train"]["calibration_samples"],
+    seed: int = SAMPLING_CONFIG["default_seed"],
 ) -> dict[str, object]:
-    """Evaluate two routers on exactly the same test draws/configuration."""
     before = evaluate_calibration(before_runner, test_samples, num_samples=num_samples, seed=seed)
     after = evaluate_calibration(after_runner, test_samples, num_samples=num_samples, seed=seed)
     return {

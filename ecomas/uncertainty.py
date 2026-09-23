@@ -1,16 +1,13 @@
-"""Utilities for empirical output distributions and second-order Tsallis entropy."""
-
 from collections import Counter
 from dataclasses import dataclass
 from typing import Iterable, Mapping
 
+from ecomas.config import METRIC_CONFIG
 from ecomas.semantic_clustering import cluster_answers
 
 
 @dataclass(frozen=True)
 class SystemEntropyEstimate:
-    """Semantic system uncertainty estimators for one question."""
-
     task_name: str
     question_uid: str
     num_answers: int
@@ -36,7 +33,6 @@ def estimate_system_entropy(
     *,
     question: str = "",
 ) -> SystemEntropyEstimate:
-    """Estimate semantic system uncertainty after one joint clustering pass."""
     result = cluster_answers(task_name, question_uid, answers, question=question)
     ids = tuple(result.cluster_by_output_id[item.output_id] for item in result.answers)
     distribution = answer_distribution(str(value) for value in ids)
@@ -68,7 +64,7 @@ def second_order_tsallis(probabilities: Mapping[str, float] | Iterable[float]) -
     if any(value < 0 for value in probs):
         raise ValueError("Probabilities must be non-negative")
     total = sum(probs)
-    if probs and abs(total - 1.0) > 1e-8:
+    if probs and abs(total - 1.0) > METRIC_CONFIG["probability_sum_tolerance"]:
         raise ValueError(f"Probabilities must sum to one, got {total}")
     return 1.0 - sum(value * value for value in probs)
 
@@ -78,12 +74,10 @@ def empirical_second_order_tsallis(answers: Iterable[str]) -> float:
 
 
 def records_answer_distribution(records: Iterable[object]) -> dict[str, float]:
-    """Estimate the final-answer distribution from RunRecord-like objects."""
     return answer_distribution(getattr(record, "normalized_prediction", "") for record in records)
 
 
 def grouped_answer_reports(records: Iterable[object]) -> dict[str, dict[str, object]]:
-    """Aggregate repeated RunRecords by uid with distribution and Tsallis entropy."""
     grouped: dict[str, list[str]] = {}
     for record in records:
         uid = str(getattr(record, "uid", ""))
@@ -105,12 +99,6 @@ def semantic_cluster_report(
     *,
     question: str = "",
 ) -> dict[str, object]:
-    """Build one frozen, question-local semantic answer report.
-
-    ``answers`` is intentionally consumed as a complete batch so all paired
-    continuations share exactly the same symbolic relation matrix and cluster
-    IDs.  The report is suitable for serialization alongside run records.
-    """
     result = cluster_answers(task_name, question_uid, answers, question=question)
     cluster_values = [result.cluster_by_output_id[item.output_id] for item in result.answers]
     distribution = answer_distribution(str(value) for value in cluster_values)

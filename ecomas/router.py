@@ -7,16 +7,17 @@ import torch
 from torch import nn
 from abc import ABC, abstractmethod
 
+from ecomas.config import METRIC_CONFIG, ROUTER_CONFIG, RUNTIME_CONFIG
+
 
 class RouterMLP(nn.Module):
     def __init__(self, input_dim: int, num_agents: int) -> None:
         super().__init__()
-        # Keep the layer names and dimensions aligned with Puppeteer's
-        # MLP_PolicyNetwork so its policy checkpoints can be transferred.
-        self.fc1 = nn.Linear(input_dim, 512)
-        self.fc2 = nn.Linear(512, 128)
-        self.fc3 = nn.Linear(128, 32)
-        self.fc4 = nn.Linear(32, num_agents)
+        first, second, third = ROUTER_CONFIG["hidden_dimensions"]
+        self.fc1 = nn.Linear(input_dim, first)
+        self.fc2 = nn.Linear(first, second)
+        self.fc3 = nn.Linear(second, third)
+        self.fc4 = nn.Linear(third, num_agents)
         self.relu = nn.ReLU()
         self.softmax = nn.Softmax(dim=1)
 
@@ -36,10 +37,8 @@ class RouterDecision:
 
 
 class RouterPolicy(ABC):
-    """Common policy interface for deterministic and stochastic routing."""
-
     @abstractmethod
-    def decide(self, encoded_state: torch.Tensor, mode: str = "argmax", seed: int | None = None) -> RouterDecision:
+    def decide(self, encoded_state: torch.Tensor, mode: str = RUNTIME_CONFIG["router_modes"][0], seed: int | None = None) -> RouterDecision:
         raise NotImplementedError
 
 
@@ -49,7 +48,7 @@ class ArgmaxRouter(RouterPolicy):
         task_name: str,
         agent_names: list[str],
         input_dim: int,
-        device: str = "cpu",
+        device: str = ROUTER_CONFIG["default_device"],
         encoder_model_path: Path | None = None,
     ) -> None:
         self.task_name = task_name
@@ -58,12 +57,12 @@ class ArgmaxRouter(RouterPolicy):
         self.encoder_model_path = Path(encoder_model_path) if encoder_model_path else None
         self.model = RouterMLP(input_dim, len(agent_names)).to(self.device)
 
-    def decide(self, encoded_state: torch.Tensor, mode: str = "argmax", seed: int | None = None) -> RouterDecision:
-        if mode not in {"argmax", "sample"}:
+    def decide(self, encoded_state: torch.Tensor, mode: str = RUNTIME_CONFIG["router_modes"][0], seed: int | None = None) -> RouterDecision:
+        if mode not in RUNTIME_CONFIG["router_modes"]:
             raise ValueError(f"Unknown router mode: {mode}")
         encoded_state = encoded_state.to(self.device)
         probs = self.model(encoded_state)
-        if mode == "argmax":
+        if mode == RUNTIME_CONFIG["router_modes"][0]:
             idx = int(torch.argmax(probs, dim=-1).item())
         else:
             generator = None
@@ -75,7 +74,7 @@ class ArgmaxRouter(RouterPolicy):
             agent_index=idx,
             agent_name=self.agent_names[idx],
             probabilities=[float(x) for x in probs.squeeze(0).detach().cpu().tolist()],
-            log_prob=torch.log(probs.squeeze(0)[idx].clamp_min(1e-8)),
+            log_prob=torch.log(probs.squeeze(0)[idx].clamp_min(METRIC_CONFIG["router_probability_floor"])),
         )
 
     def save(self, path: Path) -> None:

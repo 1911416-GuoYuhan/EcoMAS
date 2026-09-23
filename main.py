@@ -9,7 +9,7 @@ from pathlib import Path
 import torch
 
 from ecomas.agents import SpecialistAgent
-from ecomas.config import DEFAULT_ENCODER_MODEL_PATH, DEFAULT_QWEN_PATH, PROJECT_ROOT, RuntimeConfig
+from ecomas.config import ARTIFACT_CONFIG, COMMAND_CONFIG, PATH_CONFIG, RUNTIME_CONFIG, RuntimeConfig, project_path
 from ecomas.datasets import load_samples
 from ecomas.encoder import build_encoder
 from ecomas.llm import build_llm
@@ -57,7 +57,9 @@ def build_runner(task_name: str, runtime: RuntimeConfig, checkpoint: Path | None
         device=router_device,
         encoder_model_path=runtime.encoder_model_path,
     )
-    if load_checkpoint and checkpoint and checkpoint.exists():
+    if load_checkpoint:
+        if checkpoint is None or not checkpoint.is_file():
+            raise FileNotFoundError(f"Router checkpoint not found: {checkpoint}")
         router.load(checkpoint)
     return agents, encoder, router
 
@@ -100,40 +102,43 @@ def summarize(records) -> dict:
 def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--task", choices=sorted(TASK_REGISTRY), required=True)
     parser.add_argument("--split", default=None)
-    parser.add_argument("--limit", type=int, default=1)
-    parser.add_argument("--benchmark-root", default="/home_bak/guoyuhan/benchmarks")
-    parser.add_argument("--output-root", default=str(PROJECT_ROOT / "runs"))
-    parser.add_argument("--checkpoint-root", default=str(PROJECT_ROOT / "checkpoints"))
-    parser.add_argument("--llm-backend", choices=["local_hf", "mock"], default="local_hf")
+    parser.add_argument("--limit", type=int, default=COMMAND_CONFIG["common"]["limit"])
+    parser.add_argument("--benchmark-root", default=str(project_path(PATH_CONFIG["benchmark_root"])))
+    parser.add_argument("--output-root", default=str(project_path(PATH_CONFIG["output_root"])))
+    parser.add_argument("--checkpoint-root", default=str(project_path(PATH_CONFIG["checkpoint_root"])))
+    parser.add_argument("--llm-backend", choices=RUNTIME_CONFIG["llm_backends"], default=RUNTIME_CONFIG["llm_backend"])
     parser.add_argument(
         "--llm-model-path",
-        default=str(DEFAULT_QWEN_PATH),
+        default=str(project_path(PATH_CONFIG["generation_model"])),
     )
-    parser.add_argument("--encoder-model-path", default=str(DEFAULT_ENCODER_MODEL_PATH))
-    parser.add_argument("--max-new-tokens", type=int, default=768)
-    parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--encoder-backend", choices=["hf"], default="hf")
-    parser.add_argument("--device", default="auto")
+    parser.add_argument("--encoder-model-path", default=str(project_path(PATH_CONFIG["encoder_model"])))
+    parser.add_argument("--max-new-tokens", type=int, default=RUNTIME_CONFIG["max_new_tokens"])
+    parser.add_argument("--temperature", type=float, default=RUNTIME_CONFIG["inference_temperature"])
+    parser.add_argument("--encoder-backend", choices=RUNTIME_CONFIG["encoder_backends"], default=RUNTIME_CONFIG["encoder_backend"])
+    parser.add_argument("--device", default=RUNTIME_CONFIG["device"])
 
 
 def default_split(task: str) -> str:
-    if task == "mmlu_pro":
-        return "validation"
-    if task == "math500":
-        return "test"
-    if task == "chaosnli":
-        return "mnli_m"
-    raise ValueError(task)
+    return str(TASK_REGISTRY[task]["default_split"])
 
 
 def default_checkpoint(task: str, checkpoint_root: Path) -> Path:
-    pretrained = sorted((PROJECT_ROOT / "pretrained" / task).glob("*.pt"))
-    return pretrained[-1] if pretrained else checkpoint_root / task / "router.pt"
+    pretrained = pretrained_checkpoint_path(task)
+    return pretrained if pretrained.is_file() else checkpoint_root / task / ARTIFACT_CONFIG["router_checkpoint"]
 
 
-def pretrained_checkpoint(task: str) -> Path | None:
-    candidates = sorted((PROJECT_ROOT / "pretrained" / task).glob("*.pt"))
-    return candidates[-1] if candidates else None
+def pretrained_checkpoint_path(task: str) -> Path:
+    return project_path(PATH_CONFIG["pretrained_root"]) / task / ARTIFACT_CONFIG["pretrained_checkpoint"]
+
+
+def required_pretrained_checkpoint(task: str) -> Path:
+    checkpoint = pretrained_checkpoint_path(task)
+    if not checkpoint.is_file():
+        raise FileNotFoundError(
+            f"Pretrained orchestrator not found for {task}: {checkpoint}. "
+            "Place the dataset-specific router checkpoint at this path before running explain or train."
+        )
+    return checkpoint
 
 
 def main() -> None:
@@ -146,29 +151,27 @@ def main() -> None:
     add_common_args(run_parser)
     run_parser.add_argument("--checkpoint", default=None)
     run_parser.add_argument("--require-checkpoint", action="store_true")
-    run_parser.add_argument("--router-mode", choices=["argmax", "sample"], default="argmax")
-    run_parser.add_argument("--num-samples", type=int, default=1)
-    run_parser.add_argument("--seed", type=int, default=0)
+    run_parser.add_argument("--router-mode", choices=RUNTIME_CONFIG["router_modes"], default=COMMAND_CONFIG["run"]["router_mode"])
+    run_parser.add_argument("--num-samples", type=int, default=COMMAND_CONFIG["run"]["num_samples"])
+    run_parser.add_argument("--seed", type=int, default=COMMAND_CONFIG["run"]["seed"])
 
     explain_parser = subparsers.add_parser("explain")
     add_common_args(explain_parser)
-    explain_parser.add_argument("--checkpoint", default=None)
-    explain_parser.add_argument("--require-checkpoint", action="store_true")
-    explain_parser.add_argument("--sampling-budget", type=int, default=10)
-    explain_parser.add_argument("--seed", type=int, default=0)
-    explain_parser.add_argument("--parallel-workers", type=int, default=1)
-    explain_parser.set_defaults(temperature=0.7)
+    explain_parser.add_argument("--sampling-budget", type=int, default=COMMAND_CONFIG["explain"]["sampling_budget"])
+    explain_parser.add_argument("--seed", type=int, default=COMMAND_CONFIG["explain"]["seed"])
+    explain_parser.add_argument("--parallel-workers", type=int, default=COMMAND_CONFIG["explain"]["parallel_workers"])
+    explain_parser.set_defaults(temperature=RUNTIME_CONFIG["training_temperature"])
 
     train_parser = subparsers.add_parser("train")
     add_common_args(train_parser)
-    train_parser.add_argument("--epochs", type=int, default=1)
-    train_parser.add_argument("--lr", type=float, default=1e-3)
-    train_parser.add_argument("--loss", choices=["calibration", "accuracy", "mixed"], default="calibration")
-    train_parser.add_argument("--calibration-samples", type=int, default=4)
-    train_parser.add_argument("--seed", type=int, default=0)
-    train_parser.add_argument("--test-split", default="test")
+    train_parser.add_argument("--epochs", type=int, default=COMMAND_CONFIG["train"]["epochs"])
+    train_parser.add_argument("--lr", type=float, default=COMMAND_CONFIG["train"]["learning_rate"])
+    train_parser.add_argument("--loss", choices=COMMAND_CONFIG["train"]["loss_choices"], default=COMMAND_CONFIG["train"]["loss"])
+    train_parser.add_argument("--calibration-samples", type=int, default=COMMAND_CONFIG["train"]["calibration_samples"])
+    train_parser.add_argument("--seed", type=int, default=COMMAND_CONFIG["train"]["seed"])
+    train_parser.add_argument("--test-split", default=COMMAND_CONFIG["train"]["test_split"])
     train_parser.add_argument("--test-limit", type=int, default=None)
-    train_parser.set_defaults(temperature=0.7)
+    train_parser.set_defaults(temperature=RUNTIME_CONFIG["training_temperature"])
 
     args = parser.parse_args()
     if args.command == "list-tasks":
@@ -190,36 +193,39 @@ def main() -> None:
     if args.command == "explain" and args.sampling_budget < 2:
         raise ValueError("--sampling-budget must be at least 2")
     runtime = build_runtime(args)
-    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    stamp = datetime.utcnow().strftime(ARTIFACT_CONFIG["run_directory_timestamp_format"])
     mode = args.command
     run_dir = runtime.output_root / args.task / mode / stamp
     if args.command == "train":
-        checkpoint_path = runtime.checkpoint_root / args.task / "router.pt"
-        init_checkpoint = pretrained_checkpoint(args.task)
+        checkpoint_path = runtime.checkpoint_root / args.task / ARTIFACT_CONFIG["router_checkpoint"]
+        init_checkpoint = required_pretrained_checkpoint(args.task)
+    elif args.command == "explain":
+        checkpoint_path = required_pretrained_checkpoint(args.task)
+        init_checkpoint = checkpoint_path
     else:
         checkpoint_path = Path(args.checkpoint) if getattr(args, "checkpoint", None) else default_checkpoint(args.task, runtime.checkpoint_root)
         init_checkpoint = checkpoint_path
     samples = load_samples(args.task, runtime.benchmark_root, args.split, args.limit)
-    if args.command in {"run", "explain"} and args.require_checkpoint and not checkpoint_path.exists():
+    if args.command == "run" and args.require_checkpoint and not checkpoint_path.exists():
         raise FileNotFoundError(f"Router checkpoint not found: {checkpoint_path}")
 
     agents, encoder, router = build_runner(
         args.task,
         runtime,
         init_checkpoint,
-        load_checkpoint=bool(init_checkpoint and init_checkpoint.exists()),
+        load_checkpoint=args.command in {"explain", "train"} or bool(init_checkpoint and init_checkpoint.exists()),
     )
     from ecomas.runner import MASRunner
 
     runner = MASRunner(args.task, agents, encoder, router)
-    result_path = run_dir / "results.jsonl"
+    result_path = run_dir / ARTIFACT_CONFIG["results"]
     calibration_report_path = None
 
     if args.command == "run":
         records = run_inference(runner, samples, result_path, route_mode=args.router_mode,
                                 num_samples=args.num_samples, seed=args.seed)
     elif args.command == "explain":
-        explanation_path = run_dir / "explanation.json"
+        explanation_path = run_dir / ARTIFACT_CONFIG["explanation"]
         records = run_explanation(
             runner,
             samples,
@@ -239,10 +245,10 @@ def main() -> None:
             epochs=args.epochs,
             lr=args.lr,
             loss_name=args.loss,
-            calibration_samples=getattr(args, "calibration_samples", 4),
-            seed=getattr(args, "seed", 0),
+            calibration_samples=getattr(args, "calibration_samples", COMMAND_CONFIG["train"]["calibration_samples"]),
+            seed=getattr(args, "seed", COMMAND_CONFIG["train"]["seed"]),
         )
-        if args.loss in {"calibration", "mixed"}:
+        if args.loss in COMMAND_CONFIG["train"]["calibration_report_losses"]:
             from ecomas.training import evaluate_calibration
             test_samples = load_samples(args.task, runtime.benchmark_root, args.test_split, args.test_limit or args.limit)
             post_metrics = evaluate_calibration(runner, test_samples, num_samples=max(2, args.calibration_samples), seed=args.seed)
@@ -256,7 +262,7 @@ def main() -> None:
                 "before": {key: value for key, value in pre_metrics.items() if key != "records"},
                 "after": {key: value for key, value in post_metrics.items() if key != "records"},
             }
-            calibration_report_path = run_dir / "calibration_report.json"
+            calibration_report_path = run_dir / ARTIFACT_CONFIG["calibration_report"]
             calibration_report_path.write_text(json.dumps(calibration_report, ensure_ascii=False, indent=2), encoding="utf-8")
 
     summary = summarize(records)
@@ -267,6 +273,7 @@ def main() -> None:
             "mode": mode,
             "result_path": str(result_path),
             "checkpoint_path": str(checkpoint_path),
+            "initial_checkpoint_path": str(init_checkpoint),
             "llm_backend": runtime.llm_backend,
             "encoder_backend": runtime.encoder_backend,
         }

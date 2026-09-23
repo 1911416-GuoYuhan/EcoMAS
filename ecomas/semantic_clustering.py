@@ -1,12 +1,3 @@
-"""Question-conditioned semantic answer clustering.
-
-The public entry point deliberately accepts a batch of answers.  Answers are
-first mapped to deterministic symbolic propositions, then a complete pairwise
-bidirectional-entailment matrix is built and frozen into question-local
-clusters.  This keeps semantic identity independent of generation order and
-lets paired sampling use one consistent same-cluster kernel.
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -149,7 +140,6 @@ def _math_symbol(answer: str) -> tuple[str, str, str]:
     if re.fullmatch(r"[A-Za-z]+(?:[ .'][A-Za-z]+)*", text):
         compact = re.sub(r"\s+", " ", text).strip().casefold()
         return "text", f"math_text::{compact}", "normalized_text"
-    # Preserve common structured answer types before scalar expression parsing.
     if re.fullmatch(r"\([^()]+(?:,[^()]+)+\)", text):
         answer_type = "tuple"
     elif re.fullmatch(r"\{.*\}", text):
@@ -167,8 +157,6 @@ def _math_symbol(answer: str) -> tuple[str, str, str]:
             return answer_type, f"math_{answer_type}::{values!r}", "sympy_structured"
         return answer_type, f"math::{_canonical_srepr(text)}", "sympy"
     except Exception:
-        # A deterministic lexical key is still a resolved symbol.  It is not
-        # silently merged with another unresolved answer.
         compact = re.sub(r"\s+", " ", text).strip().casefold()
         return answer_type, f"math_text::{_digest(compact)}", "normalized_text"
 
@@ -244,7 +232,6 @@ def cluster_answers(
     question: str = "",
     mode: str = "task_symbolic",
 ) -> SemanticClusteringResult:
-    """Cluster one question's complete answer batch in one deterministic pass."""
     if mode != "task_symbolic":
         raise ValueError("Only deterministic task_symbolic mode is currently supported")
     items = [_answer_item(task_name, question_uid, item, index) for index, item in enumerate(answers)]
@@ -270,9 +257,6 @@ def cluster_answers(
                 entail_lr = entail_rl = left.canonical_key == right.canonical_key
                 method = "task_label"
             same = entail_lr and entail_rl
-            # Distinct task labels are mutually exclusive propositions.  A
-            # distinct mathematical expression is merely non-equivalent: it
-            # is not a contradiction without the question's constraints.
             contradiction_lr = contradiction_rl = (
                 not same and left.answer_type in {"mmlu_option", "nli_label"}
             )
@@ -283,8 +267,6 @@ def cluster_answers(
                 left.output_id, right.output_id, entail_lr, entail_rl,
                 contradiction_lr, contradiction_rl, same, method
             ))
-    # Complete-link is deterministic here: symbolic equivalence is already
-    # transitive, but this construction remains safe if a backend is added.
     clusters: list[list[int]] = []
     for index in range(size):
         compatible = [cluster for cluster in clusters if all(equivalent[index][member] for member in cluster)]
@@ -317,5 +299,4 @@ def cluster_answers(
 
 
 def semantic_kernel(result: SemanticClusteringResult):
-    """Return a paired-sampling compatible same-cluster kernel."""
     return result.same_cluster

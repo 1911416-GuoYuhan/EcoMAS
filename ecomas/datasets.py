@@ -8,6 +8,8 @@ from typing import Any, Iterable
 
 import pandas as pd
 
+from ecomas.config import DATASET_CONFIG
+
 
 @dataclass(frozen=True)
 class BenchmarkSample:
@@ -31,9 +33,10 @@ def load_samples(task_name: str, benchmark_root: Path, split: str, limit: int | 
 
 
 def load_mmlu_pro(root: Path, split: str) -> Iterable[BenchmarkSample]:
-    path = root / "mmlupro" / f"{split}.parquet"
+    config = DATASET_CONFIG["mmlu_pro"]
+    path = root / config["directory"] / f"{split}.{config['extension']}"
     if not path.exists():
-        candidate = root / "mmlupro" / "split_60_20_20" / f"{split}.parquet"
+        candidate = root / config["fallback_directory"] / f"{split}.{config['extension']}"
         if candidate.exists():
             path = candidate
     frame = pd.read_parquet(path)
@@ -58,9 +61,10 @@ def load_mmlu_pro(root: Path, split: str) -> Iterable[BenchmarkSample]:
 
 
 def load_math500(root: Path, split: str) -> Iterable[BenchmarkSample]:
-    path = root / "math500" / f"{split}.jsonl"
+    config = DATASET_CONFIG["math500"]
+    path = root / config["directory"] / f"{split}.{config['extension']}"
     if not path.exists():
-        path = root / "math500" / "split_300_100_100" / f"{split}.jsonl"
+        path = root / config["fallback_directory"] / f"{split}.{config['extension']}"
     if not path.exists():
         raise ValueError(f"MATH-500 split not found: {split}")
     with path.open("r", encoding="utf-8") as handle:
@@ -80,17 +84,14 @@ def load_math500(root: Path, split: str) -> Iterable[BenchmarkSample]:
 
 
 def load_chaosnli(root: Path, split: str) -> Iterable[BenchmarkSample]:
-    split_map = {
-        "mnli_m": "chaosNLI_mnli_m.jsonl",
-        "snli": "chaosNLI_snli.jsonl",
-        "alphanli": "chaosNLI_alphanli.jsonl",
-    }
+    config = DATASET_CONFIG["chaosnli"]
+    split_map = config["source_files"]
     if split in {"train", "validation", "test"}:
-        path = root / "chaosnli" / "split_60_20_20" / f"{split}.jsonl"
+        path = root / config["derived_directory"] / f"{split}.jsonl"
     else:
         if split not in split_map:
             raise ValueError(f"ChaosNLI split must be one of {sorted(split_map)} or train/validation/test")
-        path = root / "chaosnli" / split_map[split]
+        path = root / config["directory"] / split_map[split]
     with path.open("r", encoding="utf-8") as handle:
         for line in handle:
             row = json.loads(line)

@@ -10,6 +10,7 @@ from typing import Callable
 import torch
 
 from ecomas.agents import AgentOutput, SpecialistAgent, is_protocol_compliant, parse_agent_response
+from ecomas.config import COMMAND_CONFIG, PROMPT_CONFIG, RUNTIME_CONFIG
 from ecomas.datasets import BenchmarkSample
 from ecomas.encoder import FrozenTextEncoder
 from ecomas.evaluation import answer_match, is_valid_answer, normalize_answer
@@ -25,7 +26,7 @@ class StepRecord:
     analysis: str
     candidate_answer: str
     raw_text: str
-    route_mode: str = "argmax"
+    route_mode: str = COMMAND_CONFIG["run"]["router_mode"]
     generation_seed: int | None = None
     route_seed: int | None = None
     state_digest: str = ""
@@ -92,20 +93,14 @@ class MASRunner:
         forced_output: str | None = None,
         seed: int | None = None,
         *,
-        route_mode: str = "sample",
+        route_mode: str = RUNTIME_CONFIG["router_modes"][1],
         route_seed: int | None = None,
         generation_seed: int | None = None,
     ) -> str:
-        """Run only the suffix under an explicit conditional policy.
-
-        ``route_mode`` selects either categorical sampling or argmax for every
-        unfixed route in the suffix. ``seed`` remains a backwards-compatible
-        shorthand for both seed roots.
-        """
         if seed is not None:
             route_seed = seed if route_seed is None else route_seed
             generation_seed = seed if generation_seed is None else generation_seed
-        if route_mode not in {"argmax", "sample"}:
+        if route_mode not in RUNTIME_CONFIG["router_modes"]:
             raise ValueError(f"Unknown route mode: {route_mode}")
         snapshot_payload = (
             snapshot.state_messages,
@@ -120,8 +115,6 @@ class MASRunner:
         )
         if key in self.branch_cache:
             return self.branch_cache[key]
-        # Branches may run concurrently.  Use shallow agent copies so the
-        # frozen LLM is shared, while each branch owns its dialog history.
         branch_agents = {}
         for name, history in snapshot.agent_histories.items():
             branch_agent = copy(self.agents[name])
@@ -169,7 +162,7 @@ class MASRunner:
         sample: BenchmarkSample,
         training: bool = False,
         loss_fn: Callable[[str, str, str], float] | None = None,
-        route_mode: str = "argmax",
+        route_mode: str = COMMAND_CONFIG["run"]["router_mode"],
         generation_seed: int | None = None,
         route_seed: int | None = None,
     ) -> tuple[RunRecord, torch.Tensor | None]:
@@ -184,7 +177,7 @@ class MASRunner:
         state_messages = [
             {
                 "role": "system",
-                "content": f"You are an assistant. Your task is to {sample.input_text}",
+                "content": PROMPT_CONFIG["initial_state_template"].format(task_text=sample.input_text),
             }
         ]
         step_records: list[StepRecord] = []
@@ -300,7 +293,8 @@ def _summarize_agent_output(output: AgentOutput) -> str:
     ).strip()
     reasoning = re.sub(r"\b(?:FINAL\s+ANSWER|CANDIDATE[_ ]ANSWER)\s*:", "Reported answer:", reasoning,
                        flags=re.IGNORECASE)
-    if len(reasoning) > 2400:
-        reasoning = reasoning[-2400:]
+    reasoning_limit = PROMPT_CONFIG["reasoning_character_limit"]
+    if len(reasoning) > reasoning_limit:
+        reasoning = reasoning[-reasoning_limit:]
     candidate = output.candidate_answer if output.parse_valid else "(no valid task answer)"
     return f"Agent: {output.agent_name}\nReasoning: {reasoning}\nCandidate answer: {candidate}"

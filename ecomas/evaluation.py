@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import re
 
-FLOAT_TOLERANCE = 1e-6
+from ecomas.config import METRIC_CONFIG
+
+
+FLOAT_TOLERANCE = METRIC_CONFIG["float_tolerance"]
 INVALID_ANSWER_PREFIX = "invalid::"
 
 
@@ -17,7 +20,7 @@ def is_valid_answer(task_name: str, answer: str) -> bool:
     if task_name == "chaosnli":
         return text.lower() in {"entailment", "neutral", "contradiction"}
     if task_name == "math500":
-        if not text or len(text) > 160:
+        if not text or len(text) > METRIC_CONFIG["math_answer_max_characters"]:
             return False
         forbidden = (
             r"\[\s*YOUR\s+(?:FINAL\s+)?ANSWER\s*\]",

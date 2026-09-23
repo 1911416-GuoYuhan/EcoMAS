@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 *.pt
+!pretrained/**/*.pt
 .DS_Store
 
 runs/

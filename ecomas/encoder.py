@@ -7,12 +7,13 @@ from typing import Any
 import torch
 from torch import nn
 
+from ecomas.config import ENCODER_CONFIG, RUNTIME_CONFIG
+
 
 def prepare_messages_for_template(
     messages: list[dict[str, Any]],
     chat_template: str | None,
 ) -> list[dict[str, Any]]:
-    """Preserve system context for tokenizers whose template ignores it."""
     prepared = deepcopy(messages)
     template = str(chat_template or "")
     supports_system = any(
@@ -53,9 +54,7 @@ class FrozenTextEncoder(nn.Module):
 
 
 class HFStateEncoder(FrozenTextEncoder):
-    """Frozen Hugging Face model used to embed the current MAS context."""
-
-    def __init__(self, model_path: Path, device: str = "auto") -> None:
+    def __init__(self, model_path: Path, device: str = RUNTIME_CONFIG["device"]) -> None:
         super().__init__()
         from transformers import AutoModel, AutoTokenizer
 
@@ -84,10 +83,10 @@ class HFStateEncoder(FrozenTextEncoder):
     def truncate(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         messages = deepcopy(messages)
         length = sum(len(str(message.get("content", ""))) for message in messages)
-        while length > 12000:
+        while length > ENCODER_CONFIG["max_context_characters"]:
             for message in messages:
                 content = str(message.get("content", ""))
-                message["content"] = content[-int(len(content) * 0.75):]
+                message["content"] = content[-int(len(content) * ENCODER_CONFIG["truncation_ratio"]):]
             length = sum(len(str(message.get("content", ""))) for message in messages)
         return messages
 
@@ -103,7 +102,7 @@ class HFStateEncoder(FrozenTextEncoder):
             return_tensors="pt",
             return_dict=True,
             truncation=True,
-            max_length=2048,
+            max_length=ENCODER_CONFIG["max_length"],
         )
 
     def forward(self, message_batches: list[list[dict[str, Any]]]) -> torch.Tensor:

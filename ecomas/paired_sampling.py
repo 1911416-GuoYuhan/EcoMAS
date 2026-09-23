@@ -1,8 +1,8 @@
-"""Paired continuation estimators from the EcoMAS uncertainty decomposition."""
-
 from dataclasses import dataclass
 from typing import Callable, Hashable, Sequence
 from concurrent.futures import ThreadPoolExecutor
+
+from ecomas.config import RUNTIME_CONFIG, SAMPLING_CONFIG
 
 
 @dataclass(frozen=True)
@@ -41,31 +41,17 @@ def same_cluster(
     cluster_fn: Callable[[object], Hashable] = lambda x: x,
     cluster_kernel: Callable[[object, object], bool] | None = None,
 ) -> int:
-    """Return the binary semantic kernel used by the estimators.
-
-    ``cluster_kernel`` is preferred for question-conditioned semantic
-    clustering. ``cluster_fn`` remains as a compatibility path for exact
-    symbolic keys and existing callers.
-    """
     if cluster_kernel is not None:
         return int(bool(cluster_kernel(left, right)))
     return int(cluster_fn(left) == cluster_fn(right))
 
 
 class PairedSampler:
-    """Estimate EcoMAS components using independent C/R/Z continuations.
-
-    ``sample_main`` must sample a complete trajectory. ``continue_from`` must
-    independently sample a final output from a context, optionally fixing the
-    current action and/or output. The callback is responsible for deterministic
-    context updates and all suffix randomness.
-    """
-
     def __init__(self, sample_main: Callable[[], Trajectory], continue_from: Callable[..., object],
                  horizon: int, cluster_fn: Callable[[object], Hashable] = lambda x: x,
                  cluster_kernel: Callable[[object, object], bool] | None = None,
                  batch_cluster_fn: Callable[[Sequence[object]], Sequence[Hashable]] | None = None,
-                 parallel_workers: int = 1) -> None:
+                 parallel_workers: int = SAMPLING_CONFIG["parallel_workers"]) -> None:
         self.sample_main = sample_main
         self.continue_from = continue_from
         self.horizon = horizon
@@ -166,11 +152,10 @@ def runner_paired_sampler(
     sample,
     cluster_fn=lambda x: x,
     *,
-    route_mode: str = "sample",
-    seed: int = 0,
-    parallel_workers: int = 1,
+    route_mode: str = RUNTIME_CONFIG["router_modes"][1],
+    seed: int = SAMPLING_CONFIG["default_seed"],
+    parallel_workers: int = SAMPLING_CONFIG["parallel_workers"],
 ) -> PairedSampler:
-    """Build a paired estimator backed by a real MASRunner."""
     call_index = 0
 
     def next_seed() -> int:

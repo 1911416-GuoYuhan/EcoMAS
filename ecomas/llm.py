@@ -6,14 +6,16 @@ from typing import Optional
 
 import torch
 
+from ecomas.config import RUNTIME_CONFIG
+
 
 class LocalHFLLM:
     def __init__(
         self,
         model_path: Path,
-        max_new_tokens: int = 96,
-        temperature: float = 0.0,
-        device: str = "auto",
+        max_new_tokens: int = RUNTIME_CONFIG["max_new_tokens"],
+        temperature: float = RUNTIME_CONFIG["inference_temperature"],
+        device: str = RUNTIME_CONFIG["device"],
     ) -> None:
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -58,7 +60,7 @@ class LocalHFLLM:
                 [text],
                 return_tensors="pt",
                 truncation=True,
-                max_length=2048,
+                max_length=RUNTIME_CONFIG["generation_max_length"],
                 padding=True,
             ).to(device)
         finally:
@@ -72,8 +74,8 @@ class LocalHFLLM:
                 **encoded,
                 do_sample=self.temperature > 0,
                 temperature=self.temperature if self.temperature > 0 else None,
-                top_p=0.9 if self.temperature > 0 else None,
-                top_k=20 if self.temperature > 0 else None,
+                top_p=RUNTIME_CONFIG["top_p"] if self.temperature > 0 else None,
+                top_k=RUNTIME_CONFIG["top_k"] if self.temperature > 0 else None,
                 max_new_tokens=self.max_new_tokens,
                 pad_token_id=self.tokenizer.pad_token_id,
                 eos_token_id=self.tokenizer.eos_token_id,
@@ -87,8 +89,6 @@ class LocalHFLLM:
 
 
 class MockLLM:
-    """Fast deterministic backend for wiring tests; real experiments use LocalHFLLM."""
-
     def generate(self, system_prompt: str, user_prompt: str, seed: int | None = None) -> str:
         options = re.findall(r"\b([A-J])\s*:", user_prompt)
         if "entailment" in user_prompt.lower() and "hypothesis" in user_prompt.lower():
